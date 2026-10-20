@@ -1,7 +1,8 @@
 # organize.sh
 
-A small, dependency-light Bash script that sorts the contents of a directory
-into category folders based on file extension.
+A small, dependency-light Bash script that organizes directory contents into
+category folders. It supports extension-based categories, TV episode grouping,
+date folders, custom rules, duplicate detection, undo, and dry runs.
 
 ## Features
 
@@ -268,7 +269,35 @@ category folders, and never overwrites an existing file. If a destination is
 already occupied or the file is missing, that entry is skipped with a warning.
 
 Log files are hidden and are ignored by the organizer (even with `--hidden`).
-You can delete old logs manually once you no longer need them.
+You can delete old logs manually once you no longer need them. Files removed
+with `--duplicates delete` are deleted permanently and are not in the log.
+
+## Development
+
+Run the test suite locally:
+
+```sh
+bash tests/test.sh
+```
+
+Continuous integration (`.github/workflows/ci.yml`) runs:
+
+- Bash syntax checks and ShellCheck
+- The full test suite on Ubuntu
+- The full test suite on Alpine with only Bash installed, exercising BusyBox
+  `find`, `stat`, `mv`, and related tools
+
+Releases (`.github/workflows/release.yml`) run when a tag matching `v*` is
+pushed. They build a `.tar.gz` containing `organize.sh` and `README.md`, create
+a `.sha256` checksum, and publish both as GitHub release assets:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+There is no server component; "deployment" for this project means publishing a
+release artifact through GitHub Releases.
 
 ## Notes and safety
 

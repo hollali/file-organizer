@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish release artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build archive
+        run: |
+          set -euo pipefail
+          mkdir -p dist/organize
+          cp organize.sh README.md dist/organize/
+          tar -C dist -czf "organize-${GITHUB_REF_NAME}.tar.gz" organize
+          sha256sum "organize-${GITHUB_REF_NAME}.tar.gz" > "organize-${GITHUB_REF_NAME}.tar.gz.sha256"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            organize-*.tar.gz
+            organize-*.tar.gz.sha256
+          generate_release_notes: true

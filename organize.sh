@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# organize.sh - sort files into category folders by extension.
+# organize.sh - sort files and folders into category folders.
+#
+# Features: extension categories, TV grouping, date sorting, custom rules,
+# duplicate detection, dry-run, undo, and a summary report.
 #
 # Usage: ./organize.sh [options] [directory]
 #
@@ -432,6 +435,7 @@ rule_for() {
 
 	shopt -s nocasematch
 	for ((i = 0; i < ${#RULE_PATTERNS[@]}; i++)); do
+		# shellcheck disable=SC2053 # the right-hand side is intentionally a glob
 		if [[ $base == ${RULE_PATTERNS[i]} ]]; then
 			printf '%s\n' "${RULE_DESTS[i]}"
 			shopt -u nocasematch
