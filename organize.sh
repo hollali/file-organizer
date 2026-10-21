@@ -17,18 +17,30 @@ MOVE_FOLDERS=0
 INCLUDE_HIDDEN=0
 UNDO=0
 TV_MODE=0
+MUSIC_MODE=0
 BY_DATE=0
 DEDUPE=0
 DUP_MODE=skip
+RENAME=0
+LINK=0
+JSON=0
 RULES_FILE=""
 RULES_PATH=""
 TARGET=""
 DIR=""
+MIN_SIZE=""
+MAX_SIZE=""
+OLDER_THAN=""
 
 CATEGORIES=(Images Documents Videos Audio Archives "Disk Images" Code Fonts Executables Other Folders)
 
 RULE_PATTERNS=()
 RULE_DESTS=()
+CAT_EXT_NAMES=()
+CAT_EXT_LISTS=()
+INCLUDE_PATTERNS=()
+EXCLUDE_PATTERNS=()
+CONFIG_ARGS=()
 declare -A SIZE_INDEX=()
 declare -A HASH_CACHE=()
 declare -A SEEN_HASH=()
@@ -45,6 +57,7 @@ MOVED_BYTES=0
 DUP_SKIPPED=0
 DUP_MOVED=0
 DUP_DELETED=0
+DUP_TRASHED=0
 
 usage() {
 	cat <<'EOF'
@@ -57,13 +70,24 @@ Options:
   -r, --recursive    Include files in subdirectories (moved to DIRECTORY/category)
   -F, --folders      Also move top-level subdirectories into Folders/
   -T, --tv           Group TV episodes as Videos/Show/Season NN/
+  -M, --music        Group tracks as Audio/Artist/Album/ (tags or "Artist - Album - N - Title")
   -H, --hidden       Include hidden files
   -n, --dry-run      Show what would happen without moving anything
   -u, --undo         Undo the most recent run in the given directory
       --by-date      Group files as Category/YYYY/MM/
       --dedupe       Skip files identical to ones already organized
-      --duplicates M Handle duplicates: skip (default), delete, or move
+      --duplicates M Handle duplicates: skip (default), delete, move, or trash
+      --trash        Shorthand for --duplicates trash (moves dups to the system trash)
+  -i, --include G    Only organize files whose name matches glob G (repeatable)
+  -x, --exclude G    Skip files whose name matches glob G (repeatable)
+      --min-size S   Skip files smaller than S (bytes, or K/M/G suffix)
+      --max-size S   Skip files larger than S (bytes, or K/M/G suffix)
+      --older-than N Only organize files not modified in the last N days
+      --rename       Normalize names while moving: lowercase, spaces to underscores
+  -l, --link         Leave a symlink at the original path pointing at the new location
       --rules FILE   Load custom rules (default: ~/.config/organize/rules.conf)
+      --config FILE  Load default flags from FILE (default: ~/.config/organize/config.conf)
+      --json         Print the summary as JSON
   -h, --help         Show this help
 EOF
 }
@@ -72,6 +96,89 @@ die() {
 	printf 'organize: %s\n' "$*" >&2
 	exit 1
 }
+
+parse_size() {
+	local s=$1 n unit
+	[[ $s =~ ^([0-9]+)([kKmMgG]?)$ ]] || die "invalid size: $s (use bytes or K/M/G suffix)"
+	n=${BASH_REMATCH[1]}
+	unit=${BASH_REMATCH[2]}
+	case $unit in
+	k | K) n=$((n * 1024)) ;;
+	m | M) n=$((n * 1048576)) ;;
+	g | G) n=$((n * 1073741824)) ;;
+	esac
+	printf '%s' "$n"
+}
+
+percent_encode() {
+	local s=$1 out="" c i
+	for ((i = 0; i < ${#s}; i++)); do
+		c=${s:i:1}
+		case $c in
+		[a-zA-Z0-9.~_/-]) out+=$c ;;
+		*)
+			printf -v c '%%%02X' "'$c"
+			out+=$c
+			;;
+		esac
+	done
+	printf '%s' "$out"
+}
+
+load_default_config() {
+	local file=$1 line
+	local -a words=()
+	[[ -f $file ]] || return 0
+	while IFS= read -r line || [[ -n $line ]]; do
+		line=${line%%#*}
+		read -r -a words <<<"$line"
+		((${#words[@]} > 0)) || continue
+		CONFIG_ARGS+=("${words[@]}")
+	done <"$file"
+}
+
+CONFIG_CLI=""
+prev_arg=""
+for arg in "$@"; do
+	[[ $prev_arg == --config ]] && CONFIG_CLI=$arg
+	prev_arg=$arg
+done
+
+config_path=""
+if [[ -n $CONFIG_CLI ]]; then
+	config_path=$CONFIG_CLI
+elif [[ -n ${XDG_CONFIG_HOME:-} ]]; then
+	config_path=$XDG_CONFIG_HOME/organize/config.conf
+elif [[ -n ${HOME:-} ]]; then
+	config_path=$HOME/.config/organize/config.conf
+fi
+if [[ -n $config_path ]]; then
+	if [[ -f $config_path ]]; then
+		load_default_config "$config_path"
+		expect_value=0
+		for w in "${CONFIG_ARGS[@]}"; do
+			if ((expect_value)); then
+				expect_value=0
+				continue
+			fi
+			case $w in
+			--target | -t | --duplicates | --rules | --config | --include | -i | --exclude | -x | --min-size | --max-size | --older-than)
+				expect_value=1
+				;;
+			-*)
+				;;
+			*)
+				die "config: only options are allowed: $w"
+				;;
+			esac
+		done
+		if ((${#CONFIG_ARGS[@]} > 0)); then
+			set -- "${CONFIG_ARGS[@]}" "$@"
+		fi
+	elif [[ -n $CONFIG_CLI ]]; then
+		die "config file not found: $CONFIG_CLI"
+	fi
+fi
 
 while (($# > 0)); do
 	case "$1" in
@@ -92,6 +199,10 @@ while (($# > 0)); do
 		TV_MODE=1
 		shift
 		;;
+	-M | --music)
+		MUSIC_MODE=1
+		shift
+		;;
 	-H | --hidden)
 		INCLUDE_HIDDEN=1
 		shift
@@ -102,6 +213,49 @@ while (($# > 0)); do
 		;;
 	-u | --undo)
 		UNDO=1
+		shift
+		;;
+	-i | --include)
+		(($# >= 2)) || die "option $1 requires an argument"
+		INCLUDE_PATTERNS+=("$2")
+		shift 2
+		;;
+	-x | --exclude)
+		(($# >= 2)) || die "option $1 requires an argument"
+		EXCLUDE_PATTERNS+=("$2")
+		shift 2
+		;;
+	--min-size)
+		(($# >= 2)) || die "option $1 requires an argument"
+		MIN_SIZE=$(parse_size "$2")
+		shift 2
+		;;
+	--max-size)
+		(($# >= 2)) || die "option $1 requires an argument"
+		MAX_SIZE=$(parse_size "$2")
+		shift 2
+		;;
+	--older-than)
+		(($# >= 2)) || die "option $1 requires an argument"
+		[[ $2 =~ ^[0-9]+$ ]] || die "invalid days: $2 (use a whole number)"
+		OLDER_THAN=$2
+		shift 2
+		;;
+	--rename)
+		RENAME=1
+		shift
+		;;
+	-l | --link)
+		LINK=1
+		shift
+		;;
+	--json)
+		JSON=1
+		shift
+		;;
+	--trash)
+		DUP_MODE=trash
+		DEDUPE=1
 		shift
 		;;
 	--by-date)
@@ -115,11 +269,11 @@ while (($# > 0)); do
 	--duplicates)
 		(($# >= 2)) || die "option $1 requires an argument"
 		case "$2" in
-		skip | delete | move)
+		skip | delete | move | trash)
 			DUP_MODE=$2
 			;;
 		*)
-			die "invalid duplicate mode: $2 (use skip, delete, or move)"
+			die "invalid duplicate mode: $2 (use skip, delete, move, or trash)"
 			;;
 		esac
 		DEDUPE=1
@@ -128,6 +282,11 @@ while (($# > 0)); do
 	--rules)
 		(($# >= 2)) || die "option $1 requires an argument"
 		RULES_FILE=$2
+		shift 2
+		;;
+	--config)
+		# Value is consumed by the pre-scan above; just skip past it here.
+		(($# >= 2)) || die "option $1 requires an argument"
 		shift 2
 		;;
 	-h | --help)
@@ -213,7 +372,9 @@ undo_last() {
 			continue
 		fi
 		mkdir -p -- "$(dirname -- "$src")"
-		if [[ -e $src ]]; then
+		if [[ -L $src && $src -ef $dest ]]; then
+			rm -f -- "$src"
+		elif [[ -e $src ]]; then
 			printf 'skip (target exists): %s\n' "$src" >&2
 			continue
 		fi
@@ -325,6 +486,50 @@ tv_category() {
 	printf 'Videos/%s/Season %02d\n' "$show" "$((10#$season))"
 }
 
+# Turn a name into a single safe path component: no slashes, trimmed,
+# dots and underscores become spaces, repeated spaces collapsed.
+sanitize_component() {
+	local s=$1
+	s=${s//\//}
+	s=${s//./ }
+	s=${s//_/ }
+	while [[ $s == *"  "* ]]; do
+		s=${s//  / }
+	done
+	s=${s#"${s%%[! ]*}"}
+	s=${s%"${s##*[! ]}"}
+	printf '%s' "$s"
+}
+
+# Print the relative folder for a track as Audio/Artist/Album, using tags
+# when exiftool is present and an "Artist - Album - NN - Title" filename
+# otherwise. Fails when no artist can be determined.
+music_category() {
+	local src=$1 base artist="" album=""
+	local re='^(.+)[ ]-[ ](.+)[ ]-[ ]{0,1}[0-9]{1,3}[ ]-[ ](.+)$'
+
+	if command -v exiftool >/dev/null 2>&1; then
+		artist=$(exiftool -s3 -Artist "$src" 2>/dev/null || true)
+		album=$(exiftool -s3 -Album "$src" 2>/dev/null || true)
+	fi
+
+	base=$(basename -- "$src")
+	if [[ -z $artist || -z $album ]] && [[ $base =~ $re ]]; then
+		[[ -z $artist ]] && artist=${BASH_REMATCH[1]}
+		[[ -z $album ]] && album=${BASH_REMATCH[2]}
+	fi
+
+	artist=$(sanitize_component "$artist")
+	album=$(sanitize_component "$album")
+	[[ -n $artist ]] || return 1
+
+	if [[ -n $album ]]; then
+		printf 'Audio/%s/%s\n' "$artist" "$album"
+	else
+		printf 'Audio/%s\n' "$artist"
+	fi
+}
+
 unique_path() {
 	local dest=$1 is_dir=${2:-0}
 	local dir base name ext i=1
@@ -347,11 +552,39 @@ unique_path() {
 	printf '%s\n' "$dest"
 }
 
+rename_basename() {
+	local name=$1 base ext
+	if [[ $name != .* && $name == *.* ]]; then
+		base=${name%.*}
+		ext=.${name##*.}
+	else
+		base=$name
+		ext=""
+	fi
+	base=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+	ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+	base=${base// /_}
+	while [[ $base == *__* ]]; do
+		base=${base//__/_}
+	done
+	base=${base#_}
+	base=${base%_}
+	[[ -n $base ]] || {
+		printf '%s' "$name"
+		return
+	}
+	printf '%s%s' "$base" "$ext"
+}
+
 move_one() {
 	local src=$1 cat=$2 is_dir=${3:-0}
 	local dest_dir=$TARGET/$cat
-	local dest size=0
-	dest=$(unique_path "$dest_dir/$(basename -- "$src")" "$is_dir")
+	local dest size=0 name
+	name=$(basename -- "$src")
+	if [[ $RENAME -eq 1 && $is_dir -eq 0 ]]; then
+		name=$(rename_basename "$name")
+	fi
+	dest=$(unique_path "$dest_dir/$name" "$is_dir")
 	LAST_DEST=$dest
 
 	if [[ $is_dir -eq 0 ]]; then
@@ -359,15 +592,24 @@ move_one() {
 	fi
 
 	if [[ $DRY_RUN -eq 1 ]]; then
-		printf 'would move: %s -> %s\n' "$src" "$dest"
+		if [[ $LINK -eq 1 ]]; then
+			printf 'would move: %s -> %s (symlink left)\n' "$src" "$dest"
+		else
+			printf 'would move: %s -> %s\n' "$src" "$dest"
+		fi
 		record_move "$cat" "$size"
 		return
 	fi
 
 	mkdir -p -- "$dest_dir"
 	mv -- "$src" "$dest"
+	if [[ $LINK -eq 1 ]]; then
+		ln -s -- "$dest" "$src"
+		printf 'moved: %s -> %s (symlink left)\n' "$src" "$dest"
+	else
+		printf 'moved: %s -> %s\n' "$src" "$dest"
+	fi
 	log_move "$src" "$dest"
-	printf 'moved: %s -> %s\n' "$src" "$dest"
 	record_move "$cat" "$size"
 }
 
@@ -389,12 +631,51 @@ add_managed_dir() {
 
 load_rules() {
 	local file=$1 line pattern dest lineno=0
+	local cat_name cat_exts
+	local -a ext_arr=()
 	[[ -f $file ]] || die "rules file not found: $file"
 
 	while IFS= read -r line || [[ -n $line ]]; do
 		lineno=$((lineno + 1))
 		line=$(trim "$line")
 		[[ -z $line || $line == \#* ]] && continue
+
+		if [[ $line == @category* ]]; then
+			line=${line#@category}
+			line=$(trim "$line")
+			if [[ $line == *'='* ]]; then
+				cat_name=${line%%=*}
+				cat_exts=${line#*=}
+			elif [[ $line == *:* ]]; then
+				cat_name=${line%%:*}
+				cat_exts=${line#*:}
+			else
+				die "rules: $file:$lineno: expected '@category Name = ext ...'"
+			fi
+			cat_name=$(trim "$cat_name")
+			cat_exts=$(trim "$cat_exts")
+			[[ -n $cat_name ]] || die "rules: $file:$lineno: empty category name"
+			[[ -n $cat_exts ]] || die "rules: $file:$lineno: empty extension list"
+			if [[ $cat_name == */* || $cat_name == .* ]]; then
+				die "rules: $file:$lineno: category name must not start with '.' or contain '/'"
+			fi
+			add_managed_dir "$cat_name"
+			cat_exts=${cat_exts//,/ }
+			# shellcheck disable=SC2206 # word splitting is intentional
+			ext_arr=($cat_exts)
+			((${#ext_arr[@]} > 0)) || die "rules: $file:$lineno: empty extension list"
+			local i found=-1
+			for ((i = 0; i < ${#CAT_EXT_NAMES[@]}; i++)); do
+				[[ ${CAT_EXT_NAMES[i]} == "$cat_name" ]] && found=$i
+			done
+			if ((found >= 0)); then
+				CAT_EXT_LISTS[found]+=" ${ext_arr[*]}"
+			else
+				CAT_EXT_NAMES+=("$cat_name")
+				CAT_EXT_LISTS+=("${ext_arr[*]}")
+			fi
+			continue
+		fi
 
 		if [[ $line == *'->'* ]]; then
 			pattern=${line%%->*}
@@ -444,6 +725,70 @@ rule_for() {
 	done
 	shopt -u nocasematch
 	return 1
+}
+
+# Match an extension against @category definitions; print the category name.
+custom_category_for() {
+	local ext=$1 i e
+	((${#CAT_EXT_NAMES[@]} > 0)) || return 1
+	ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+	for ((i = 0; i < ${#CAT_EXT_NAMES[@]}; i++)); do
+		for e in ${CAT_EXT_LISTS[i]}; do
+			if [[ $(printf '%s' "$e" | tr '[:upper:]' '[:lower:]') == "$ext" ]]; then
+				printf '%s\n' "${CAT_EXT_NAMES[i]}"
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
+match_any_glob() {
+	local name=$1 g
+	shift
+	(($# > 0)) || return 1
+	shopt -s nocasematch
+	for g in "$@"; do
+		# shellcheck disable=SC2053 # the right-hand side is intentionally a glob
+		if [[ $name == $g ]]; then
+			shopt -u nocasematch
+			return 0
+		fi
+	done
+	shopt -u nocasematch
+	return 1
+}
+
+# Return 0 when the file should be left alone due to size or age filters.
+file_filters_skip() {
+	local src=$1 size mtime now
+	if [[ -n $MIN_SIZE || -n $MAX_SIZE ]]; then
+		size=$(file_size "$src" 2>/dev/null) || return 1
+		[[ -n $MIN_SIZE && $size -lt $MIN_SIZE ]] && return 0
+		[[ -n $MAX_SIZE && $size -gt $MAX_SIZE ]] && return 0
+	fi
+	if [[ -n $OLDER_THAN ]]; then
+		mtime=$(stat -c %Y "$src" 2>/dev/null || true)
+		[[ -z $mtime ]] && mtime=$(date -r "$src" +%s 2>/dev/null || true)
+		if [[ -n $mtime ]]; then
+			now=$(date +%s)
+			((now - mtime < OLDER_THAN * 86400)) && return 0
+		fi
+	fi
+	return 1
+}
+
+trash_file() {
+	local src=$1 data_home tdir base dest info ts
+	data_home=${XDG_DATA_HOME:-${HOME:?}/.local/share}
+	tdir=$data_home/Trash
+	mkdir -p -- "$tdir/files" "$tdir/info" || die "cannot create trash directory: $tdir"
+	dest=$(unique_path "$tdir/files/$(basename -- "$src")")
+	base=$(basename -- "$dest")
+	info=$tdir/info/$base.trashinfo
+	ts=$(date +%Y-%m-%dT%H:%M:%S)
+	printf '[Trash Info]\nPath=%s\nDeletionDate=%s\n' "$(percent_encode "$src")" "$ts" >"$info"
+	mv -- "$src" "$dest"
 }
 
 date_path() {
@@ -559,6 +904,15 @@ handle_duplicate() {
 		DUP_MOVED=$((DUP_MOVED + 1))
 		move_one "$src" Duplicates
 		;;
+	trash)
+		DUP_TRASHED=$((DUP_TRASHED + 1))
+		if [[ $DRY_RUN -eq 1 ]]; then
+			printf 'would trash duplicate: %s (matches %s)\n' "$src" "$match"
+		else
+			trash_file "$src"
+			printf 'trashed duplicate: %s (matches %s)\n' "$src" "$match"
+		fi
+		;;
 	esac
 }
 
@@ -583,11 +937,52 @@ human_size() {
 	fi
 }
 
+json_escape() {
+	local s=$1
+	s=${s//\\/\\\\}
+	s=${s//\"/\\\"}
+	s=${s//$'\n'/\\n}
+	s=${s//$'\t'/\\t}
+	printf '%s' "$s"
+}
+
+print_summary_json() {
+	local cat first=1
+	local -a keys=()
+
+	printf '{'
+	printf '"dry_run":%s,' "$([[ $DRY_RUN -eq 1 ]] && printf true || printf false)"
+	printf '"moved":%d,' "$MOVED_COUNT"
+	printf '"moved_bytes":%d,' "$MOVED_BYTES"
+	printf '"categories":{'
+	if ((${#COUNT_BY_CAT[@]} > 0)); then
+		keys=("${!COUNT_BY_CAT[@]}")
+		while IFS= read -r cat; do
+			[[ $first -eq 1 ]] || printf ','
+			first=0
+			printf '"%s":{"count":%d,"bytes":%d}' \
+				"$(json_escape "$cat")" "${COUNT_BY_CAT[$cat]}" "${SIZE_BY_CAT[$cat]}"
+		done < <(printf '%s\n' "${keys[@]}" | sort)
+	fi
+	printf '},'
+	printf '"duplicates":{"skipped":%d,"moved":%d,"deleted":%d,"trashed":%d}' \
+		"$DUP_SKIPPED" "$DUP_MOVED" "$DUP_DELETED" "$DUP_TRASHED"
+	if [[ -n $LOG ]]; then
+		printf ',"log":"%s"' "$(json_escape "$LOG")"
+	fi
+	printf '}\n'
+}
+
 print_summary() {
 	local cat
 	local -a keys=()
 
-	if ((MOVED_COUNT == 0 && DUP_SKIPPED == 0 && DUP_DELETED == 0 && DUP_MOVED == 0)); then
+	if [[ $JSON -eq 1 ]]; then
+		print_summary_json
+		return 0
+	fi
+
+	if ((MOVED_COUNT == 0 && DUP_SKIPPED == 0 && DUP_DELETED == 0 && DUP_MOVED == 0 && DUP_TRASHED == 0)); then
 		printf 'Nothing to organize.\n'
 		return 0
 	fi
@@ -607,7 +1002,8 @@ print_summary() {
 	printf '  %-20s %6d files  %s\n' "Total" "$MOVED_COUNT" "$(human_size "$MOVED_BYTES")"
 
 	if [[ $DEDUPE -eq 1 ]]; then
-		printf 'Duplicates: %d skipped, %d moved, %d deleted\n' "$DUP_SKIPPED" "$DUP_MOVED" "$DUP_DELETED"
+		printf 'Duplicates: %d skipped, %d moved, %d deleted, %d trashed\n' \
+			"$DUP_SKIPPED" "$DUP_MOVED" "$DUP_DELETED" "$DUP_TRASHED"
 	fi
 }
 
@@ -648,6 +1044,12 @@ should_skip() {
 	[[ -n $RULES_PATH && $src -ef $RULES_PATH ]] && return 0
 	[[ $name == .organize-log-*.log ]] && return 0
 	[[ $INCLUDE_HIDDEN -eq 0 ]] && is_hidden_name "$name" && return 0
+	if ((${#EXCLUDE_PATTERNS[@]} > 0)) && match_any_glob "$name" "${EXCLUDE_PATTERNS[@]}"; then
+		return 0
+	fi
+	if ((${#INCLUDE_PATTERNS[@]} > 0)) && ! match_any_glob "$name" "${INCLUDE_PATTERNS[@]}"; then
+		return 0
+	fi
 	return 1
 }
 
@@ -675,11 +1077,13 @@ if [[ $RECURSIVE -eq 1 ]]; then
 
 	while IFS= read -r -d '' src; do
 		should_skip "$src" && continue
+		file_filters_skip "$src" && continue
 		files+=("$src")
 	done < <(find "$DIR" -mindepth 1 \( "${prune[@]}" \) -prune -o \( -type f -o -type l \) -print0 2>/dev/null)
 else
 	while IFS= read -r -d '' src; do
 		should_skip "$src" && continue
+		file_filters_skip "$src" && continue
 		files+=("$src")
 	done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 fi
@@ -691,18 +1095,23 @@ if ((${#files[@]} > 0)); then
 		ext=""
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
 
-		tv_matched=0
+		structured=0
 		if cat=$(rule_for "$base"); then
+			:
+		elif cat=$(custom_category_for "$ext"); then
 			:
 		else
 			cat=$(category_for "$ext")
 			if [[ $TV_MODE -eq 1 && $cat == Videos ]] && tv_cat=$(tv_category "$src"); then
 				cat=$tv_cat
-				tv_matched=1
+				structured=1
+			elif [[ $MUSIC_MODE -eq 1 && $cat == Audio ]] && music_cat=$(music_category "$src"); then
+				cat=$music_cat
+				structured=1
 			fi
 		fi
 
-		if [[ $BY_DATE -eq 1 && $tv_matched -eq 0 ]]; then
+		if [[ $BY_DATE -eq 1 && $structured -eq 0 ]]; then
 			date_dir=$(date_path "$src" "$cat" 2>/dev/null || true)
 			if [[ -n $date_dir ]]; then
 				cat=$cat/$date_dir
