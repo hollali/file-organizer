@@ -47,14 +47,36 @@ It does not use distro-specific paths, package managers, or init systems.
 
 ## Installation
 
+Clone the repo and run it directly:
+
 ```sh
+git clone https://github.com/ChrisTitusTech/organize.sh.git  # or your fork
+cd organize.sh
 chmod +x organize.sh
 ```
 
-Optionally install it on your `PATH`:
+Optionally install it on your `PATH` using the included setup script:
+
+```sh
+./setup.sh
+```
+
+Or manually:
 
 ```sh
 install -Dm755 organize.sh ~/.local/bin/organize
+```
+
+To uninstall:
+
+```sh
+./uninstall.sh
+```
+
+You can check dependencies with:
+
+```sh
+./organize.sh --doctor
 ```
 
 ## Usage

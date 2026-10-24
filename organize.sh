@@ -7,6 +7,9 @@
 #
 # Usage: ./organize.sh [options] [directory]
 #
+
+VERSION="1.0.0"
+
 set -euo pipefail
 
 SCRIPT_PATH=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
@@ -60,8 +63,8 @@ DUP_DELETED=0
 DUP_TRASHED=0
 
 usage() {
-	cat <<'EOF'
-Usage: organize.sh [options] [directory]
+	cat <<EOF
+Usage: organize.sh [options] [directory] (v${VERSION})
 
 Sort files in DIRECTORY (default: .) into category folders.
 
@@ -88,6 +91,8 @@ Options:
       --rules FILE   Load custom rules (default: ~/.config/organize/rules.conf)
       --config FILE  Load default flags from FILE (default: ~/.config/organize/config.conf)
       --json         Print the summary as JSON
+      --version      Show version and exit
+      --doctor       Check for required and optional dependencies
   -h, --help         Show this help
 EOF
 }
@@ -252,6 +257,52 @@ while (($# > 0)); do
 	--json)
 		JSON=1
 		shift
+		;;
+	--version)
+		echo "organize.sh ${VERSION}"
+		exit 0
+		;;
+	--doctor)
+		(
+			printf 'organize.sh %s - dependency check\n\n' "$VERSION"
+			ok=0; warn=0
+			if command -v bash >/dev/null && bash --version | grep -q 'version [4-9]\|version 10'; then
+				printf '  [OK] bash %s\n' "$(bash --version | head -n1 | awk '{print $4}')"
+				ok=$((ok + 1))
+			else
+				printf '  [WARN] bash version may be too old (need >= 4)\n'
+				warn=$((warn + 1))
+			fi
+			for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum; do
+				if command -v "$cmd" >/dev/null 2>&1; then
+					printf '  [OK] %s\n' "$cmd"
+					ok=$((ok + 1))
+				else
+					printf '  [WARN] %s not found\n' "$cmd"
+					warn=$((warn + 1))
+				fi
+			done
+			if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v sha256 >/dev/null 2>&1; then
+				printf '  [OK] SHA256 available (for --dedupe)\n'
+				ok=$((ok + 1))
+			else
+				printf '  [WARN] No SHA256 tool found (required for --dedupe)\n'
+				warn=$((warn + 1))
+			fi
+			if command -v exiftool >/dev/null 2>&1; then
+				printf '  [OK] exiftool (optional, for EXIF dates/music tags)\n'
+				ok=$((ok + 1))
+			else
+				printf '  [INFO] exiftool not found (optional)\n'
+			fi
+			printf '\nSummary: %d ok, %d warnings/info\n' "$ok" "$warn"
+			if [[ $warn -eq 0 ]]; then
+				printf 'All required dependencies look good!\n'
+			else
+				printf 'Some optional/missing deps detected - see above.\n'
+			fi
+		)
+		exit 0
 		;;
 	--trash)
 		DUP_MODE=trash
@@ -1152,3 +1203,43 @@ if [[ -n $LOG ]]; then
 fi
 
 print_summary
+
+doctor_deps() {
+	printf 'organize.sh %s - dependency check\n\n' "$VERSION"
+	local ok=0 warn=0
+	if command -v bash >/dev/null && bash --version | grep -q 'version [4-9]\|version 10'; then
+		printf '  [OK] bash %s\n' "$(bash --version | head -n1 | awk '{print $4}')"
+		ok=$((ok + 1))
+	else
+		printf '  [WARN] bash version may be too old (need >= 4)\n'
+		warn=$((warn + 1))
+	fi
+	for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum; do
+		if command -v "$cmd" >/dev/null 2>&1; then
+			printf '  [OK] %s\n' "$cmd"
+			ok=$((ok + 1))
+		else
+			printf '  [WARN] %s not found\n' "$cmd"
+			warn=$((warn + 1))
+		fi
+	done
+	if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v sha256 >/dev/null 2>&1; then
+		printf '  [OK] SHA256 available (for --dedupe)\n'
+		ok=$((ok + 1))
+	else
+		printf '  [WARN] No SHA256 tool found (required for --dedupe)\n'
+		warn=$((warn + 1))
+	fi
+	if command -v exiftool >/dev/null 2>&1; then
+		printf '  [OK] exiftool (optional, for EXIF dates/music tags)\n'
+		ok=$((ok + 1))
+	else
+		printf '  [INFO] exiftool not found (optional)\n'
+	fi
+	printf '\nSummary: %d ok, %d warnings/info\n' "$ok" "$warn"
+	if [[ $warn -eq 0 ]]; then
+		printf 'All required dependencies look good!\n'
+	else
+		printf 'Some optional/missing deps detected - see above.\n'
+	fi
+}
