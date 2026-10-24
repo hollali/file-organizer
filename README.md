@@ -7,12 +7,15 @@ detection, undo, and dry runs.
 
 ## Features
 
-- Sorts files into `Images`, `Documents`, `Videos`, `Audio`, `Archives`,
-  `Disk Images`, `Code`, `Fonts`, `Executables`, and `Other`
+- Sorts files into `Images`, `Documents`, `Audio`, `Archives`, `Disk Images`,
+  `Code`, `Fonts`, `Executables`, and `Other`. Video files are special-cased:
+  episodes are organized as `Show/Season NN/` and unrecognized videos stay in
+  place, so no generic `Videos/` dump folder is ever created
 - Optional TV mode: groups episodes as `Videos/Show/Season NN/`
 - Smart media mode: recursively identifies TV series, seasons, movies,
-  images, documents, and music, reuses existing folders, and moves sidecar
-  subtitles/artwork with their video
+  images, documents, and music, reuses existing folders, keeps meaningful
+  source folder names as album/context subfolders for images and documents,
+  and moves sidecar subtitles/artwork with their video
 - Optional music mode: groups tracks as `Audio/Artist/Album/`
 - Optional date sorting: `Category/YYYY/MM/`
 - Custom rules file for glob-based destinations and custom category definitions
@@ -133,7 +136,8 @@ changed until step 5.
 4. **Choose the organization mode for your files.**
 
    - Default: sort everything into category folders such as `Images/`,
-     `Documents/`, and `Videos/`.
+     `Documents/`, and `Audio/`. Episodes are organized as `Show/Season NN/`,
+     and videos without a recognizable episode pattern stay in place.
      ```sh
      ./organize.sh ~/Downloads
      ```
@@ -236,7 +240,7 @@ changed until step 5.
 | `-t, --target DIR` | Move files into `DIR` instead of organizing in place |
 | `-r, --recursive` | Include files from subdirectories (flattened into categories) |
 | `-F, --folders` | Also move top-level subdirectories into `Folders/` |
-| `-T, --tv` | Group episode files as `Videos/Show/Season NN/` |
+| `-T, --tv` | Group episode files as `Videos/Show/Season NN/` (others stay in place) |
 | `--smart`, `--media` | Smart media mode (implies `--recursive`) |
 | `-M, --music` | Group tracks as `Audio/Artist/Album/` |
 | `-H, --hidden` | Include hidden files (and hidden directories in recursive mode) |
@@ -284,9 +288,10 @@ Recognized filename patterns include:
 | `Sxx` | `Show.S01.mkv` |
 
 The show name is taken from the text before the marker; dots and underscores
-become spaces. Files that do not match any pattern are still placed in the
-regular `Videos/` folder, and all non-video files are organized as usual.
-TV matches are not given date subfolders when `--by-date` is also enabled.
+become spaces. Videos are never dumped into a flat folder: matches go to
+`Videos/Show/Season NN/`, and files that do not match any pattern stay in
+place. All non-video files are organized as usual. TV matches are not given
+date subfolders when `--by-date` is also enabled.
 
 ### Smart media mode
 
@@ -311,13 +316,17 @@ Audio/
 ```
 
 Images and documents go to the system's XDG user directories instead of
-inside the organized folder:
+inside the organized folder. When they come from a nested folder whose name
+is meaningful, that folder is kept as a context subfolder:
 
 ```
 ~/Pictures/
-  2024/05/
+  Rome Trip/          <- named after the source folder
+    2024/05/
+  2025/06/            <- no meaningful source folder name
 ~/Documents/
-  PDF/
+  Taxes 2025/         <- named after the source folder
+    PDF/
   Text/
 ```
 
@@ -334,8 +343,18 @@ inside the organized folder:
   under a type folder such as `PDF` or `Text`. The environment variables are
   honored first, then `xdg-user-dir`, then the conventional `~/Pictures` and
   `~/Documents` fallbacks.
+- Nested images and documents keep the name of their source folder as a
+  context subfolder when that name is meaningful
+  (`Rome Trip/Photos/IMG_001.jpg` goes to `~/Pictures/Rome Trip/...`).
+  Generic folder names such as `Photos`, `New Folder`, `Downloads`, or a
+  plain `2024` are ignored, and those files fall back to the normal layout.
 - Subtitles (`srt`, `ass`, `vtt`, `sub`, ...), `.nfo` files, and artwork whose
   names match an episode or movie are moved into the same destination folder.
+  Sidecar files without any matching video in the same folder (or in folders
+  whose videos point at several different destinations) stay where they are.
+- Sidecar names are matched against the video in the same folder only, so
+  `Season 3/Episode 01.srt` can never be mistaken for the `Episode 01` of
+  another season.
 - Only seasons that actually contain files are created. Existing series,
   season, and movie folders are reused case-insensitively, so
   `show/season 01` is not duplicated as `Show/Season 01`.
@@ -509,7 +528,7 @@ contain `/`; repeated definitions of the same name are merged.
 | --- | --- |
 | `Images` | jpg, jpeg, png, gif, webp, svg, tiff, heic, raw |
 | `Documents` | pdf, doc(x), txt, md, odt, rtf, xls(x), ppt(x), csv, epub |
-| `Videos` | mp4, mkv, avi, mov, webm, flv, mpeg |
+| `Videos` | mp4, mkv, avi, mov, webm, flv, mpeg — never moved to a flat folder; episodes go to `Show/Season NN/` and other videos stay in place |
 | `Audio` | mp3, wav, flac, aac, ogg, m4a, opus |
 | `Archives` | zip, tar, gz, bz2, xz, 7z, rar, zst |
 | `Disk Images` | iso, img, dmg |
@@ -699,8 +718,8 @@ pushed. They build a `.tar.gz` containing `organize.sh` and `README.md`, create
 a `.sha256` checksum, and publish both as GitHub release assets:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 There is no server component; "deployment" for this project means publishing a

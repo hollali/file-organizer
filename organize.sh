@@ -8,7 +8,7 @@
 # Usage: ./organize.sh [options] [directory]
 #
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 set -euo pipefail
 
@@ -81,16 +81,24 @@ Usage: organize.sh [options] [directory] (v${VERSION})
 
 Sort files in DIRECTORY (default: .) into category folders.
 
+Videos are handled specially: episodes are organized as Show/Season NN/ and
+unrecognized videos (movies, samples, clips) are left in place, so no generic
+Videos/ dump folder is ever created (TV mode uses Videos/Show/Season NN/).
+
 Options:
   -t, --target DIR   Move files into DIR instead of organizing in place
   -r, --recursive    Include files in subdirectories (moved to DIRECTORY/category)
   -F, --folders      Also move top-level subdirectories into Folders/
-  -T, --tv           Group TV episodes as Videos/Show/Season NN/
+  -T, --tv           Group TV episodes as Videos/Show/Season NN/;
+                     unrecognized videos stay in place
   -M, --music        Group tracks as Audio/Artist/Album/ (tags or "Artist - Album - N - Title")
       --smart        Smart media mode: recursively inspect every file and folder,
                      then build Show/Season NN/, Movies/Title (Year)/,
                      Audio/Artist/Album/, date folders in ~/Pictures, and
                      type folders in ~/Documents (XDG user dirs).
+                     Nested images/documents keep their meaningful source
+                     folder as an album/context subfolder (~/Pictures/<context>,
+                     ~/Documents/<context>); generic names are ignored.
                      Reuses existing folders, moves related subtitles/artwork,
                      never overwrites, and leaves unidentified files in place.
       --media        Alias for --smart
@@ -1106,6 +1114,77 @@ document_type_dir() {
 	esac
 }
 
+# Uppercased name, non-alphanumeric characters folded to single spaces.
+normalized_name() {
+	local lw
+	lw=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+	lw=$(printf '%s' "$lw" | tr -c '[:alnum:]' ' ')
+	while [[ $lw == *"  "* ]]; do
+		lw=${lw//  / }
+	done
+	trim "$lw"
+}
+
+# Single membership test for context names; see is_generic_context_name.
+name_is_generic() {
+	local lw cat
+	lw=$(normalized_name "$1")
+	[[ -n $lw ]] || return 0
+
+	for cat in "${CATEGORIES[@]}"; do
+		[[ $(normalized_name "$cat") == "$lw" ]] && return 0
+	done
+	case $lw in
+	movies | tv | duplicates) return 0 ;;
+	esac
+
+	[[ $lw =~ ^[0-9]+$ ]] && return 0
+	[[ $lw =~ ^(19|20)[0-9]{2}$ ]] && return 0
+
+	case $lw in
+		image | images | photo | photos | photograph | photographs | picture | pictures | \
+		pics | screenshot | screenshots | camera | wallpapers | wallpaper | memes | \
+		document | documents | doc | docs | my\ documents | files | file | \
+		download | downloads | desktop | music | audio | video | videos | \
+		new\ folder | untitled | untitled\ folder | unknown | temp | tmp | \
+		misc | others | other | stuff | random | media | backup | \
+		scan | scans | scanned | to\ sort | sort | todo | inbox | general | mixed | various | \
+		web\ download | torrent | torrent\ download)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Ignore generic folder names, including duplicate suffixes such as
+# "Photos 2" or "New Folder (2)".
+is_generic_context_name() {
+	local name=$1 re_dup_suffix='^(.+)[[:space:]]*[._ -]?[0-9]{1,3}$'
+	name_is_generic "$name" && return 0
+	[[ $name =~ $re_dup_suffix ]] || return 1
+	name_is_generic "${BASH_REMATCH[1]}" && return 0
+	return 1
+}
+
+# Print the closest meaningful ancestor folder of SRC (an ancestor below DIR,
+# excluding DIR itself) for context-aware routing of images and documents.
+# Generic names such as "Photos" or "New Folder" are skipped, so a file in
+# "Rome Trip/Photos/" gets the context "Rome Trip". Prints nothing when no
+# meaningful ancestor exists.
+context_for() {
+	local src=$1 cur name
+	cur=$(dirname -- "$src")
+	while [[ $cur == "$DIR"/* ]]; do
+		name=$(basename -- "$cur")
+		if ! is_generic_context_name "$name"; then
+			printf '%s' "$name"
+			return 0
+		fi
+		cur=$(dirname -- "$cur")
+	done
+	return 0
+}
+
 # Move a file into REL under TARGET, never overwriting. If an identical file
 # already sits at the destination, treat it as a duplicate instead of adding
 # a "name (1)" copy.
@@ -1151,7 +1230,7 @@ prune_empty_source_dirs() {
 # show/season, movies by title/year, and other media by type, then moves
 # related sidecar files (subtitles, nfo, artwork) with their video.
 smart_organize() {
-	local src base ext rel key cat date_dir name d abs_dir label dest_dir
+		local src base ext rel key cat date_dir name d abs_dir label dest_dir ctx
 	local -A assoc=()
 	local -A dir_dest=()
 	local -A dir_ambig=()
@@ -1180,9 +1259,11 @@ smart_organize() {
 			continue
 		fi
 		SMART_DEST[$src]=$rel
-		key=$(assoc_key "$base")
-		[[ -n $key ]] && assoc[$key]=$rel
 		d=$(dirname -- "$src")
+		key=$(assoc_key "$base")
+		# Key sidecar associations by source directory so identical stems in
+		# different seasons can never cross-match.
+		[[ -n $key ]] && assoc[${d}/${key}]=$rel
 		if [[ -z ${dir_dest[$d]:-} ]]; then
 			dir_dest[$d]=$rel
 		elif [[ ${dir_dest[$d]} != "$rel" ]]; then
@@ -1209,8 +1290,8 @@ smart_organize() {
 			[[ $rel == Movies/* ]] && label=Movies
 		else
 			key=$(assoc_key "$base")
-			if [[ -n $key && -n ${assoc[$key]:-} ]]; then
-				rel=${assoc[$key]}
+			if [[ -n $key && -n ${assoc[${d}/${key}]:-} ]]; then
+				rel=${assoc[${d}/${key}]}
 				label=Videos
 				[[ $rel == Movies/* ]] && label=Movies
 			elif is_sidecar_file "$src" && [[ -n ${dir_dest[$d]:-} ]]; then
@@ -1222,6 +1303,10 @@ smart_organize() {
 				label=Videos
 				[[ $rel == Movies/* ]] && label=Movies
 			else
+				if is_sidecar_file "$src"; then
+					printf 'left in place (no matching video for sidecar): %s\n' "$src"
+					continue
+				fi
 				if cc=$(custom_category_for "$ext"); then
 					cat=$cc
 				else
@@ -1235,11 +1320,16 @@ smart_organize() {
 				Images)
 					date_dir=$(date_path "$src" "$cat" 2>/dev/null || true)
 					abs_dir=$(xdg_user_dir PICTURES Pictures)
+					ctx=$(context_for "$src") || ctx=""
+					[[ -n $ctx ]] && abs_dir=$abs_dir/$(sanitize_component "$ctx")
 					[[ -n $date_dir ]] && abs_dir=$abs_dir/$date_dir
 					label=Images
 					;;
 				Documents)
-					abs_dir=$(xdg_user_dir DOCUMENTS Documents)/$(document_type_dir "$ext")
+					abs_dir=$(xdg_user_dir DOCUMENTS Documents)
+					ctx=$(context_for "$src") || ctx=""
+					[[ -n $ctx ]] && abs_dir=$abs_dir/$(sanitize_component "$ctx")
+					abs_dir=$abs_dir/$(document_type_dir "$ext")
 					label=Documents
 					;;
 				Audio)
@@ -1825,9 +1915,24 @@ elif ((${#files[@]} > 0)); then
 			:
 		else
 			cat=$(category_for "$ext")
-			if [[ $TV_MODE -eq 1 && $cat == Videos ]] && tv_cat=$(tv_category "$src"); then
-				cat=$tv_cat
-				structured=1
+			if [[ $cat == Videos ]]; then
+				# Videos are never dumped into a generic folder: recognized
+				# episodes are organized, everything else stays in place.
+				if [[ $TV_MODE -eq 1 ]]; then
+					if tv_cat=$(tv_category "$src"); then
+						cat=$tv_cat
+						structured=1
+					else
+						printf 'left in place (unidentified video): %s\n' "$src"
+						continue
+					fi
+				elif detect_episode "$src"; then
+					cat=$(series_rel "$SMART_SHOW" "$SMART_SEASON")
+					structured=1
+				else
+					printf 'left in place (unidentified video): %s\n' "$src"
+					continue
+				fi
 			elif [[ $MUSIC_MODE -eq 1 && $cat == Audio ]] && music_cat=$(music_category "$src"); then
 				cat=$music_cat
 				structured=1

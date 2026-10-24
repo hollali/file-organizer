@@ -58,10 +58,27 @@ printf 'tv mode\n'
 mkdir -p "$ROOT/tv"
 workdir tv
 touch "Show.S01E02.mkv" "Show.1x03.mp4" "random.mkv"
-run --tv . >/dev/null 2>&1 || fail "tv run failed"
+out=$(run --tv . 2>&1) || fail "tv run failed"
 expect_file "Videos/Show/Season 01/Show.S01E02.mkv"
 expect_file "Videos/Show/Season 01/Show.1x03.mp4"
-expect_file Videos/random.mkv
+expect_file random.mkv
+expect_absent "Videos/random.mkv"
+expect_contains "$out" "left in place (unidentified video)"
+
+printf 'videos are never dumped into Videos\n'
+mkdir -p "$ROOT/videos"
+workdir videos
+printf 'e1' >"Series.S01E01.mkv"
+printf 'e2' >"Other Show S02E01.mkv"
+printf 'clip' >"home clip.mp4"
+printf 'sample' >sample.mkv
+out=$(run . 2>&1) || fail "video default run failed: $out"
+expect_file "Series/Season 01/Series.S01E01.mkv"
+expect_file "Other Show/Season 02/Other Show S02E01.mkv"
+expect_file "home clip.mp4"
+expect_file sample.mkv
+expect_absent Videos
+expect_contains "$out" "left in place (unidentified video)"
 
 printf 'date sorting and undo\n'
 mkdir -p "$ROOT/dates"
@@ -322,4 +339,31 @@ run -u . >/dev/null 2>&1 || fail "smart undo failed"
 expect_file "Show.S01E01.en.srt"
 expect_file "Inception (2010)/Inception.2010.1080p.BluRay.mkv"
 
-printf 'All tests passed.\n'
+printf 'smart mode routes nested media by context\n'
+mkdir -p "$ROOT/smart/Rome Trip/Photos" "$ROOT/smart/Taxes 2025" "$ROOT/smart/New Folder" "$ROOT/smart/Web Download" "$ROOT/smart/Show/Season 3"
+workdir smart
+printf 'pic1' >"Rome Trip/Photos/IMG_001.jpg"
+printf 'taxdoc' >"Taxes 2025/invoice.pdf"
+printf 'anime' >"New Folder/shot.png"
+printf 'nested' >"Web Download/screenshot_01.png"
+printf 'loose' >readme.md
+printf 'ep3' >"Show/Season 3/Episode 01.mkv"
+printf 'subs3' >"Show/Season 3/Episode 01.srt"
+printf 'art3' >"Show/Season 3/cover.jpg"
+printf 'orphan' >stray.srt
+printf 'orphan' >"Rome Trip/lonely.srt"
+out=$(run --smart . 2>&1) || fail "smart context run failed: $out"
+expect_file "$HOME/Pictures/Rome Trip/$(date +%Y/%m)/IMG_001.jpg"
+expect_file "$HOME/Documents/Taxes 2025/PDF/invoice.pdf"
+expect_file "$HOME/Pictures/$(date +%Y/%m)/shot.png"
+expect_absent "$HOME/Pictures/New Folder"
+expect_file "$HOME/Pictures/$(date +%Y/%m)/screenshot_01.png"
+expect_absent "$HOME/Pictures/Web Download"
+expect_file "$HOME/Documents/Text/readme.md"
+expect_file "Show/Season 3/Episode 01.mkv"
+expect_file "Show/Season 3/Episode 01.srt"
+expect_file "Show/Season 3/cover.jpg"
+expect_file stray.srt
+expect_file "Rome Trip/lonely.srt"
+expect_contains "$out" "left in place"
+expect_contains "$out" "no matching video for sidecar"
