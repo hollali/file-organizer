@@ -93,6 +93,7 @@ Options:
       --json         Print the summary as JSON
       --version      Show version and exit
       --doctor       Check for required and optional dependencies
+      --install-deps Attempt to install missing dependencies (requires sudo)
   -h, --help         Show this help
 EOF
 }
@@ -301,6 +302,56 @@ while (($# > 0)); do
 			else
 				printf 'Some optional/missing deps detected - see above.\n'
 			fi
+		)
+		exit 0
+		;;
+	--install-deps)
+		(
+			printf 'organize.sh %s - installing missing dependencies\n\n' "$VERSION"
+			to_install=()
+			need_sudo=0
+			command -v bash >/dev/null || to_install+=(bash)
+			command -v find >/dev/null || to_install+=(findutils)
+			command -v stat >/dev/null || to_install+=(coreutils)
+			command -v sha256sum >/dev/null && command -v shasum >/dev/null && command -v sha256 >/dev/null || true
+			if ! command -v sha256sum >/dev/null && ! command -v shasum >/dev/null && ! command -v sha256 >/dev/null; then
+				to_install+=(coreutils)
+			fi
+			if ! command -v exiftool >/dev/null; then
+				to_install+=(libimage-exiftool-perl)
+			fi
+			if ((${#to_install[@]} == 0)); then
+				printf 'All dependencies already installed.\n'
+				exit 0
+			fi
+			printf 'Packages to install: %s\n' "${to_install[*]}"
+			if command -v apt-get >/dev/null; then
+				printf 'Detected: Debian/Ubuntu (apt)\n'
+				sudo apt-get update -qq
+				sudo apt-get install -y "${to_install[@]/libimage-exiftool-perl/libimage-exiftool-perl}"
+			elif command -v dnf >/dev/null; then
+				printf 'Detected: Fedora/RHEL (dnf)\n'
+				sudo dnf install -y perl-Image-ExifTool
+			elif command -v yum >/dev/null; then
+				printf 'Detected: RHEL/CentOS (yum)\n'
+				sudo yum install -y perl-Image-ExifTool
+			elif command -v pacman >/dev/null; then
+				printf 'Detected: Arch/Manjaro (pacman)\n'
+				sudo pacman -S --noconfirm perl-image-exiftool bash findutils coreutils
+			elif command -v zypper >/dev/null; then
+				printf 'Detected: openSUSE (zypper)\n'
+				sudo zypper install -y perl-Image-ExifTool
+			elif command -v apk >/dev/null; then
+				printf 'Detected: Alpine (apk)\n'
+				sudo apk add bash findutils coreutils exiftool
+			elif command -v brew >/dev/null; then
+				printf 'Detected: macOS (brew)\n'
+				brew install exiftool
+			else
+				printf 'Could not detect package manager. Install manually.\n'
+				exit 1
+			fi
+			printf '\nDone.\n'
 		)
 		exit 0
 		;;
