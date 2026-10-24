@@ -93,6 +93,142 @@ You can check dependencies with:
 `directory` defaults to the current directory and is organized in place unless
 `--target` is given.
 
+### Step-by-step guide
+
+Follow these steps the first time you use the script. Your files are not
+changed until step 5.
+
+1. **Get the script and make it executable.**
+
+   ```sh
+   git clone https://github.com/hollali/scripts.git
+   cd scripts
+   chmod +x organize.sh
+   ```
+
+   Optionally install it on your `PATH` so you can run `organize` from
+   anywhere:
+
+   ```sh
+   ./setup.sh
+   ```
+
+2. **Check that the required tools are available.**
+
+   ```sh
+   ./organize.sh --doctor
+   ```
+
+   Fix any `[WARN]` lines before continuing. `exiftool` is optional but
+   improves image dates and music tags.
+
+3. **Preview what the script would do.** Use `--dry-run` (`-n`) first; it
+   prints every proposed move without touching any file:
+
+   ```sh
+   ./organize.sh --dry-run ~/Downloads
+   ./organize.sh --smart --dry-run ~/Downloads
+   ```
+
+4. **Choose the organization mode for your files.**
+
+   - Default: sort everything into category folders such as `Images/`,
+     `Documents/`, and `Videos/`.
+     ```sh
+     ./organize.sh ~/Downloads
+     ```
+   - TV series and movies: build `Show/Season NN/` folders for episodes and
+     `Movies/Title (Year)/` folders for films.
+     ```sh
+     ./organize.sh --smart ~/Downloads
+     ```
+     In smart mode, series folders are created directly in the directory you
+     pass to the script. Movies go into `Movies/`, images into
+     `~/Pictures/YYYY/MM/`, documents into `~/Documents/Type/`, and music into
+     `Audio/Artist/Album/`. Files that cannot be identified are left in place.
+   - TV episodes only, keeping the older layout:
+     ```sh
+     ./organize.sh --tv ~/Downloads
+     ```
+   - Music only:
+     ```sh
+     ./organize.sh --music ~/Music/incoming
+     ```
+   - Date-based folders:
+     ```sh
+     ./organize.sh --by-date ~/Pictures
+     ```
+
+5. **Run the command without `--dry-run`.**
+
+   ```sh
+   ./organize.sh --smart ~/Downloads
+   ```
+
+   The script creates destinations as needed, never overwrites an existing
+   file, and leaves hidden files alone unless you add `--hidden`.
+
+6. **Review the summary and the log.** The run ends with a per-category count
+   and size. Every run that moved something also writes a hidden log in the
+   source directory:
+
+   ```text
+   .organize-log-YYYYMMDD-HHMMSS-PID.log
+   ```
+
+   Use `--json` if you need machine-readable output:
+
+   ```sh
+   ./organize.sh --smart --json ~/Downloads
+   ```
+
+7. **Undo a run if the result is not what you wanted.**
+
+   ```sh
+   ./organize.sh --undo ~/Downloads
+   ```
+
+   Undo moves files back to their original locations, skips occupied
+   destinations, and removes folders that became empty. Files deleted with
+   `--duplicates delete` or sent to the trash cannot be restored this way.
+
+8. **Optional: customize destinations with rules or a config file.** Create
+   `~/.config/organize/rules.conf`:
+
+   ```text
+   invoice*.pdf -> Documents/Invoices
+   *.psd        -> Images/Design
+   ```
+
+   Then run with the rules (or let them load automatically from the default
+   path):
+
+   ```sh
+   ./organize.sh --rules ~/.config/organize/rules.conf ~/Downloads
+   ```
+
+   You can also save frequently used flags in
+   `~/.config/organize/config.conf`, for example:
+
+   ```text
+   --smart
+   --dedupe --duplicates trash
+   --exclude *.tmp
+   ```
+
+9. **Optional: schedule daily organization.** This installs a cron job for
+   the given directory:
+
+   ```sh
+   ./organize.sh --schedule 09:00@~/Downloads
+   ```
+
+   Remove it again with:
+
+   ```sh
+   ./organize.sh --unschedule
+   ```
+
 ### Options
 
 | Option | Description |
