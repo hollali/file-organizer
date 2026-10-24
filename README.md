@@ -50,8 +50,8 @@ It does not use distro-specific paths, package managers, or init systems.
 Clone the repo and run it directly:
 
 ```sh
-git clone https://github.com/ChrisTitusTech/organize.sh.git  # or your fork
-cd organize.sh
+git clone https://github.com/hollali/scripts.git
+cd scripts
 chmod +x organize.sh
 ```
 
