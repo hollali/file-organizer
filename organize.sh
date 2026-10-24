@@ -21,6 +21,7 @@ INCLUDE_HIDDEN=0
 UNDO=0
 TV_MODE=0
 MUSIC_MODE=0
+SMART_MODE=0
 BY_DATE=0
 DEDUPE=0
 DUP_MODE=skip
@@ -54,6 +55,12 @@ declare -A HASH_CACHE=()
 declare -A SEEN_HASH=()
 declare -A COUNT_BY_CAT=()
 declare -A SIZE_BY_CAT=()
+declare -A SMART_DEST=()
+
+SMART_SHOW=""
+SMART_SEASON=""
+SMART_TITLE=""
+SMART_YEAR=""
 
 SHA_CMD=()
 CUR_SIZE=0
@@ -80,6 +87,13 @@ Options:
   -F, --folders      Also move top-level subdirectories into Folders/
   -T, --tv           Group TV episodes as Videos/Show/Season NN/
   -M, --music        Group tracks as Audio/Artist/Album/ (tags or "Artist - Album - N - Title")
+      --smart        Smart media mode: recursively inspect every file and folder,
+                     then build Show/Season NN/, Movies/Title (Year)/,
+                     Audio/Artist/Album/, date folders in ~/Pictures, and
+                     type folders in ~/Documents (XDG user dirs).
+                     Reuses existing folders, moves related subtitles/artwork,
+                     never overwrites, and leaves unidentified files in place.
+      --media        Alias for --smart
   -H, --hidden       Include hidden files
   -n, --dry-run      Show what would happen without moving anything
   -u, --undo         Undo the most recent run in the given directory
@@ -215,6 +229,11 @@ while (($# > 0)); do
 		;;
 	-M | --music)
 		MUSIC_MODE=1
+		shift
+		;;
+	--smart | --media)
+		SMART_MODE=1
+		RECURSIVE=1
 		shift
 		;;
 	-H | --hidden)
@@ -695,10 +714,584 @@ rename_basename() {
 	printf '%s%s' "$base" "$ext"
 }
 
+# Resolve an XDG user directory (Pictures, Documents) without depending on
+# xdg-user-dir being installed. Honors the environment variable first, then
+# the tool, then the conventional ~/Name fallback.
+xdg_user_dir() {
+	local key=$1 fallback=$2 var val
+	case $key in
+	PICTURES) var=XDG_PICTURES_DIR ;;
+	DOCUMENTS) var=XDG_DOCUMENTS_DIR ;;
+	VIDEOS) var=XDG_VIDEOS_DIR ;;
+	MUSIC) var=XDG_MUSIC_DIR ;;
+	*) var="" ;;
+	esac
+	if [[ -n $var ]]; then
+		val=${!var:-}
+		if [[ -n $val ]]; then
+			printf '%s' "$val"
+			return 0
+		fi
+	fi
+	if command -v xdg-user-dir >/dev/null 2>&1; then
+		val=$(xdg-user-dir "$key" 2>/dev/null || true)
+		if [[ -n $val && $val != "$HOME" ]]; then
+			printf '%s' "$val"
+			return 0
+		fi
+	fi
+	printf '%s/%s' "$HOME" "$fallback"
+}
+
+# Find an existing child directory of PARENT whose name equals WANT, ignoring
+# case, so a library never gains a second folder that differs only in case.
+# Prints the resolved absolute path (whether or not it exists yet).
+resolve_child_dir() {
+	local parent=$1 want=$2 d base
+	[[ -d $parent ]] || {
+		printf '%s/%s\n' "$parent" "$want"
+		return
+	}
+	shopt -s nullglob
+	for d in "$parent"/*/; do
+		base=${d%/}
+		base=${base##*/}
+		shopt -s nocasematch
+		if [[ $base == "$want" ]]; then
+			shopt -u nocasematch
+			shopt -u nullglob
+			printf '%s\n' "${d%/}"
+			return
+		fi
+		shopt -u nocasematch
+	done
+	shopt -u nullglob
+	printf '%s/%s\n' "$parent" "$want"
+}
+
+# Resolve a season folder for a show, reusing "Season 1", "Season 01", "S01",
+# or "Series 1" instead of creating a second folder for the same season.
+resolve_season_dir() {
+	local parent=$1 season=$2 d base s
+	shopt -s nullglob
+	for d in "$parent"/*/; do
+		base=${d%/}
+		base=${base##*/}
+		if s=$(season_from_folder "$base") && [[ $s == "$season" ]]; then
+			shopt -u nullglob
+			printf '%s\n' "${d%/}"
+			return
+		fi
+	done
+	shopt -u nullglob
+	printf '%s/Season %02d\n' "$parent" "$season"
+}
+
+# Resolve a slash-separated relative destination under TARGET, reusing any
+# existing case-insensitive matches. Prints the relative path.
+resolve_rel_dir() {
+	local rel=$1 cur=$TARGET comp
+	local -a parts=()
+	IFS=/ read -r -a parts <<<"$rel"
+	for comp in "${parts[@]}"; do
+		[[ -n $comp ]] || continue
+		cur=$(resolve_child_dir "$cur" "$comp")
+	done
+	if [[ $cur == "$TARGET" ]]; then
+		printf '.\n'
+	elif [[ $cur == "$TARGET"/* ]]; then
+		printf '%s\n' "${cur#"$TARGET"/}"
+	else
+		printf '%s\n' "$rel"
+	fi
+}
+
+# Strip grouping tags, normalize separators and reject empty names.
+smart_show_name() {
+	local s
+	s=$(clean_show_name "$1")
+	while [[ $s == *'['*']'* ]]; do
+		s="${s%%\[*} ${s#*\]}"
+	done
+	while [[ $s == *'('*')'* ]]; do
+		s="${s%%\(*} ${s#*\)}"
+	done
+	s=$(sanitize_component "$s")
+	printf '%s' "$s"
+}
+
+# Return the season number when NAME is a season folder such as
+# "Season 1", "Season 01", "S01", or "Series 2".
+season_from_folder() {
+	local name=$1
+	local re_season='^[Ss]eason[._ -]*([0-9]{1,2})$'
+	local re_series='^[Ss]eries[._ -]*([0-9]{1,2})$'
+	local re_short='^[Ss]([0-9]{1,2})$'
+	if [[ $name =~ $re_season ]]; then
+		printf '%s' "$((10#${BASH_REMATCH[1]}))"
+		return 0
+	fi
+	if [[ $name =~ $re_series ]]; then
+		printf '%s' "$((10#${BASH_REMATCH[1]}))"
+		return 0
+	fi
+	if [[ $name =~ ^[Ss]([0-9]{1,2})$ ]]; then
+		printf '%s' "$((10#${BASH_REMATCH[1]}))"
+		return 0
+	fi
+	return 1
+}
+
+# Set SMART_SHOW and SMART_SEASON when SRC is an identifiable TV episode.
+# Seasons and shows may come from the filename or from ancestor folders.
+# Returns non-zero when the file cannot be identified confidently.
+detect_episode() {
+	local src=$1 base dir cur name parent show="" season=""
+	local re_sxx re_nxn re_season_ep re_season re_s re_ep re_ep_bare re_episode re_dash re_numeric
+	local re_anc_season='^(.+)[._ -]+[sS]eason[._ -]*([0-9]{1,2})$'
+	local re_anc_series='^(.+)[._ -]+[sS]eries[._ -]*([0-9]{1,2})$'
+	local bare_numeric=0
+
+	base=$(basename -- "$src")
+	base=${base%.*}
+
+	re_sxx='^(.+)[._ -]+[sS]([0-9]{1,2})[._ -]*[eE]([0-9]{1,3})([^0-9]|$)'
+	re_nxn='^(.+)[._ -]+([0-9]{1,2})[xX]([0-9]{1,3})([^0-9]|$)'
+	re_season_ep='^(.+)[._ -]+[sS]eason[._ -]*([0-9]{1,2})[._ -]*([eE]pisode|[eE][pP]?)[._ -]*([0-9]{1,4})([^0-9]|$)'
+	re_season='^(.+)[._ -]+[sS]eason[._ -]*([0-9]{1,2})([^0-9]|$)'
+	re_s='^(.+)[._ -]+[sS]([0-9]{1,2})([^0-9]|$)'
+	re_ep='^(.+)[._ -]+[eE][pP]?[._ -]?([0-9]{1,4})([^0-9]|$)'
+	re_ep_bare='^[eE][pP]?[._ -]?([0-9]{1,4})([^0-9]|$)'
+	re_episode='^[eE]pisode[._ -]*([0-9]{1,4})([^0-9]|$)'
+	re_dash='^(.+)[._ -]+-[._ -]+([0-9]{1,4})[._ -]+'
+	re_numeric='^[0-9]{1,4}([^0-9]|$)'
+
+	if [[ $base =~ $re_sxx ]]; then
+		show=${BASH_REMATCH[1]}
+		season=${BASH_REMATCH[2]}
+	elif [[ $base =~ $re_nxn ]]; then
+		show=${BASH_REMATCH[1]}
+		season=${BASH_REMATCH[2]}
+	elif [[ $base =~ $re_season_ep ]]; then
+		show=${BASH_REMATCH[1]}
+		season=${BASH_REMATCH[2]}
+	elif [[ $base =~ $re_ep ]]; then
+		show=${BASH_REMATCH[1]}
+	elif [[ $base =~ $re_dash ]]; then
+		show=${BASH_REMATCH[1]}
+	elif [[ $base =~ $re_episode ]]; then
+		:
+	elif [[ $base =~ $re_season ]]; then
+		show=${BASH_REMATCH[1]}
+		season=${BASH_REMATCH[2]}
+	elif [[ $base =~ $re_s ]]; then
+		show=${BASH_REMATCH[1]}
+		season=${BASH_REMATCH[2]}
+	elif [[ $base =~ $re_ep_bare ]]; then
+		:
+	elif [[ $base =~ $re_numeric ]]; then
+		bare_numeric=1
+	else
+		return 1
+	fi
+
+	if ((bare_numeric)); then
+		show=""
+	fi
+
+	# Walk up the folder tree for missing show/season context.
+	cur=$(dirname -- "$src")
+	while [[ $cur == "$DIR"/* ]]; do
+		name=$(basename -- "$cur")
+		if [[ -z $season ]] && season=$(season_from_folder "$name"); then
+			:
+		fi
+		if [[ -z $show && $name =~ $re_anc_season ]]; then
+			show=${BASH_REMATCH[1]}
+			[[ -z $season ]] && season=$((10#${BASH_REMATCH[2]}))
+		fi
+		if [[ -z $show && $name =~ $re_anc_series ]]; then
+			show=${BASH_REMATCH[1]}
+			[[ -z $season ]] && season=$((10#${BASH_REMATCH[2]}))
+		fi
+		if [[ -n $season && -z $show ]]; then
+			parent=$(dirname -- "$cur")
+			if [[ $parent != "$DIR" ]]; then
+				show=$(basename -- "$parent")
+			fi
+		fi
+		[[ -n $show && -n $season ]] && break
+		cur=$(dirname -- "$cur")
+	done
+
+	show=$(smart_show_name "$show")
+	[[ -n $show ]] || return 1
+	[[ -n $season ]] || return 1
+	[[ $season =~ ^[0-9]+$ ]] || return 1
+
+	SMART_SHOW=$show
+	SMART_SEASON=$((10#$season))
+	return 0
+}
+
+# Set SMART_TITLE and SMART_YEAR when SRC looks like a movie. Fails for
+# generic names (sample, trailer, bare episode markers) to avoid guessing.
+detect_movie() {
+	local src=$1 base name year="" w lw out=""
+	local -a words=()
+	local re_year='^(19|20)[0-9]{2}$'
+	local re_ep_marker='[._ -][eE][pP]?[._ -]?[0-9]{1,4}([._ -]|$)'
+
+	base=$(basename -- "$src")
+	base=${base%.*}
+
+	# Bare episode markers are not movies.
+	if [[ $base =~ $re_ep_marker ]]; then
+		return 1
+	fi
+	if [[ $base =~ ^[^-]+[[:space:]]-[[:space:]][0-9]{1,4}[[:space:]]-[[:space:]] ]]; then
+		return 1
+	fi
+
+	name=${base//./ }
+	name=${name//_/ }
+
+	while [[ $name == *'['*']'* ]]; do
+		local pre=${name%%\[*} rest=${name#*\[} inner=${rest%%\]*} post=${rest#*\]}
+		if [[ $inner =~ $re_year ]]; then
+			year=$inner
+		fi
+		name="$pre $post"
+	done
+	while [[ $name == *'('*')'* ]]; do
+		local pre=${name%%\(*} rest=${name#*\(} inner=${rest%%\)*} post=${rest#*\)}
+		if [[ $inner =~ $re_year ]]; then
+			year=$inner
+		fi
+		name="$pre $post"
+	done
+	name=$(trim "$name")
+	read -r -a words <<<"$name"
+	for w in "${words[@]}"; do
+		lw=${w,,}
+		lw=${lw//[^a-z0-9]/}
+		if [[ $lw =~ $re_year ]]; then
+			year=$lw
+			continue
+		fi
+		case $lw in
+		"" | 480p | 576p | 720p | 1080p | 2160p | 4k | uhd | hdr | sdr | 10bit | 8bit | \
+			bluray | blu | brrip | bdrip | webrip | webdl | web | hdtv | dvdrip | dvd | \
+			hdcam | cam | ts | x264 | x265 | h264 | h265 | hevc | avc | aac | ac3 | eac3 | \
+			dts | dd | ddp | truehd | atmos | remux | proper | repack | extended | unrated | \
+			directors | cut | multi | dual | sub | subs | dubbed | hardsub | softsub)
+			continue
+			;;
+		esac
+		out+=" $w"
+	done
+	out=$(trim "$out")
+	out=$(sanitize_component "$out")
+	[[ -n $out ]] || return 1
+	[[ $out =~ [A-Za-z] ]] || return 1
+	lw=${out,,}
+	case $lw in
+	sample | trailer | teaser | movie | video | film | clip | download | file | \
+		unknown | untitled | output | temp | tmp | final)
+		return 1
+		;;
+	esac
+
+	SMART_TITLE=$out
+	SMART_YEAR=$year
+	return 0
+}
+
+# Normalized key used to bundle subtitles, nfo files and artwork with the
+# video they belong to. Strips extensions, language/forced/sdh suffix tokens.
+assoc_key() {
+	local name=$1 lw
+	local re_lang='[._ -]([A-Za-z]{2,3})$'
+	local re_token='[._ -]([A-Za-z0-9]{2,10})$'
+	name=${name%.*}
+	while [[ $name =~ $re_lang ]]; do
+		lw=${BASH_REMATCH[1],,}
+		case $lw in
+		en | eng | english | ar | ara | arabic | fr | fre | fra | french | es | spa | spanish | \
+			de | ger | deu | german | it | ita | italian | pt | por | portuguese | ru | rus | russian | \
+			nl | dut | dutch | pl | pol | polish | tr | tur | turkish | hi | hin | hindi | \
+			ja | jpn | japanese | ko | kor | korean | zh | chi | chs | cht | chinese | \
+			forced | sdh | cc | hi)
+			name=${name%"${BASH_REMATCH[0]}"}
+			;;
+		*)
+			break
+			;;
+		esac
+	done
+	while [[ $name =~ $re_token ]]; do
+		lw=${BASH_REMATCH[1],,}
+		case $lw in
+		480p | 576p | 720p | 1080p | 2160p | 4k | uhd | hdr | sdr | 10bit | 8bit | \
+			bluray | blu | brrip | bdrip | webrip | webdl | web | hdtv | dvdrip | dvd | \
+			hdcam | cam | x264 | x265 | h264 | h265 | hevc | avc | aac | ac3 | eac3 | \
+			dts | dd | ddp | truehd | atmos | remux | proper | repack | extended | unrated | \
+			directors | cut | multi | dual | hardsub | softsub | dubbed | \
+			thumb | thumbnail | poster | fanart | banner | backdrop | logo | clearart | disc)
+			name=${name%"${BASH_REMATCH[0]}"}
+			;;
+		*)
+			break
+			;;
+		esac
+	done
+	name=${name,,}
+	name=${name//[^a-z0-9]/}
+	printf '%s' "$name"
+}
+
+# Return 0 for subtitle/nfo files and for generic artwork names that are
+# likely to belong to the video in the same folder.
+is_sidecar_file() {
+	local base ext stem
+	base=$(basename -- "$1")
+	ext=""
+	[[ $base != .* && $base == *.* ]] && ext=${base##*.}
+	ext=${ext,,}
+	stem=${base%.*}
+	stem=${stem,,}
+	case $ext in
+	srt | ass | ssa | vtt | sub | idx | smi | nfo | sfv) return 0 ;;
+	esac
+	case $stem in
+	poster | folder | cover | fanart | thumb | thumbnail | banner | backdrop | logo | clearart | disc | landscape)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Canonical relative destination for an episode. Series live directly under
+# the target so one show is one folder (no generic Videos wrapper).
+series_rel() {
+	local show=$1 season=$2 cur
+	cur=$(resolve_child_dir "$TARGET" "$show")
+	cur=$(resolve_season_dir "$cur" "$season")
+	printf '%s\n' "${cur#"$TARGET"/}"
+}
+
+# Canonical relative destination for a movie.
+movie_rel() {
+	local title=$1 year=$2 name cur
+	if [[ -n $year ]]; then
+		name="$title ($year)"
+	else
+		name=$title
+	fi
+	cur=$(resolve_child_dir "$TARGET" Movies)
+	cur=$(resolve_child_dir "$cur" "$name")
+	printf '%s\n' "${cur#"$TARGET"/}"
+}
+
+document_type_dir() {
+	local ext
+	ext=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+	case $ext in
+	pdf) echo PDF ;;
+	doc | docx | odt | rtf | txt | md | markdown | pages) echo Text ;;
+	xls | xlsx | ods | csv | numbers) echo Spreadsheets ;;
+	ppt | pptx | odp | key) echo Presentations ;;
+	epub | mobi | azw3 | fb2) echo Ebooks ;;
+	*) echo "$(printf '%s' "$ext" | tr '[:lower:]' '[:upper:]')" ;;
+	esac
+}
+
+# Move a file into REL under TARGET, never overwriting. If an identical file
+# already sits at the destination, treat it as a duplicate instead of adding
+# a "name (1)" copy.
+smart_move() {
+	local src=$1 dest_dir=$2 label=${3:-} name dest
+	name=$(basename -- "$src")
+	if [[ $RENAME -eq 1 && ! -d $src ]]; then
+		name=$(rename_basename "$name")
+	fi
+	dest=$dest_dir/$name
+	if [[ $src -ef $dest ]]; then
+		return 0
+	fi
+	if [[ -f $src && -f $dest ]] && cmp -s -- "$src" "$dest" 2>/dev/null; then
+		handle_duplicate "$src" "$dest"
+		return 0
+	fi
+	move_one "$src" "$dest_dir" 0 "$label"
+}
+
+# Remove folders emptied by smart mode, keeping directory categories intact.
+prune_empty_source_dirs() {
+	local d top cat skip
+	[[ $DRY_RUN -eq 1 ]] && return 0
+	while IFS= read -r -d '' d; do
+		[[ $d == "$DIR" ]] && continue
+		top=${d#"$DIR"/}
+		top=${top%%/*}
+		skip=0
+		for cat in "${CATEGORIES[@]}"; do
+			if [[ $SMART_MODE -eq 1 && ($cat == Images || $cat == Documents || $cat == Videos) ]]; then
+				continue
+			fi
+			[[ $top == "$cat" ]] && skip=1
+		done
+		((skip == 1)) && continue
+		[[ $TARGET != "$DIR" && ($d == "$TARGET" || $d == "$TARGET"/*) ]] && continue
+		rmdir -- "$d" 2>/dev/null || true
+	done < <(find "$DIR" -mindepth 1 -depth -type d -not -name '.*' -print0 2>/dev/null)
+}
+
+# Smart media organizer. Recursively inspects every file, groups episodes by
+# show/season, movies by title/year, and other media by type, then moves
+# related sidecar files (subtitles, nfo, artwork) with their video.
+smart_organize() {
+	local src base ext rel key cat date_dir name d abs_dir label dest_dir
+	local -A assoc=()
+	local -A dir_dest=()
+	local -A dir_ambig=()
+
+	# Pass 1: identify videos so sidecar files can be matched regardless of
+	# which one is encountered first.
+	for src in "${files[@]}"; do
+		[[ -e $src || -L $src ]] || continue
+		base=$(basename -- "$src")
+		ext=""
+		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
+		[[ $(category_for "$ext") == Videos ]] || continue
+		# Explicit rules and custom categories always win over smart detection.
+		if rule_for "$base" >/dev/null; then
+			continue
+		fi
+		if custom_category_for "$ext" >/dev/null; then
+			continue
+		fi
+
+		if detect_episode "$src"; then
+			rel=$(series_rel "$SMART_SHOW" "$SMART_SEASON")
+		elif detect_movie "$src"; then
+			rel=$(movie_rel "$SMART_TITLE" "$SMART_YEAR")
+		else
+			continue
+		fi
+		SMART_DEST[$src]=$rel
+		key=$(assoc_key "$base")
+		[[ -n $key ]] && assoc[$key]=$rel
+		d=$(dirname -- "$src")
+		if [[ -z ${dir_dest[$d]:-} ]]; then
+			dir_dest[$d]=$rel
+		elif [[ ${dir_dest[$d]} != "$rel" ]]; then
+			dir_ambig[$d]=1
+		fi
+	done
+
+	# Pass 2: move everything.
+	for src in "${files[@]}"; do
+		[[ -e $src || -L $src ]] || continue
+		base=$(basename -- "$src")
+		ext=""
+		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
+
+		d=$(dirname -- "$src")
+		abs_dir=""
+		label=""
+		if cat=$(rule_for "$base"); then
+			rel=$cat
+			label=${cat%%/*}
+		elif [[ -n ${SMART_DEST[$src]:-} ]]; then
+			rel=${SMART_DEST[$src]}
+			label=Videos
+			[[ $rel == Movies/* ]] && label=Movies
+		else
+			key=$(assoc_key "$base")
+			if [[ -n $key && -n ${assoc[$key]:-} ]]; then
+				rel=${assoc[$key]}
+				label=Videos
+				[[ $rel == Movies/* ]] && label=Movies
+			elif is_sidecar_file "$src" && [[ -n ${dir_dest[$d]:-} ]]; then
+				if [[ -n ${dir_ambig[$d]:-} ]]; then
+					printf 'left in place (ambiguous sidecar): %s\n' "$src"
+					continue
+				fi
+				rel=${dir_dest[$d]}
+				label=Videos
+				[[ $rel == Movies/* ]] && label=Movies
+			else
+				if cc=$(custom_category_for "$ext"); then
+					cat=$cc
+				else
+					cat=$(category_for "$ext")
+				fi
+				case $cat in
+				Videos)
+					printf 'left in place (unidentified video): %s\n' "$src"
+					continue
+					;;
+				Images)
+					date_dir=$(date_path "$src" "$cat" 2>/dev/null || true)
+					abs_dir=$(xdg_user_dir PICTURES Pictures)
+					[[ -n $date_dir ]] && abs_dir=$abs_dir/$date_dir
+					label=Images
+					;;
+				Documents)
+					abs_dir=$(xdg_user_dir DOCUMENTS Documents)/$(document_type_dir "$ext")
+					label=Documents
+					;;
+				Audio)
+					if music_cat=$(music_category "$src"); then
+						rel=$music_cat
+					else
+						rel=Audio
+					fi
+					label=Audio
+					;;
+				*)
+					rel=$cat
+					label=${cat%%/*}
+					;;
+				esac
+				if [[ $BY_DATE -eq 1 && -z $abs_dir ]]; then
+					date_dir=$(date_path "$src" "$rel" 2>/dev/null || true)
+					[[ -n $date_dir ]] && rel=$rel/$date_dir
+				fi
+			fi
+		fi
+
+		if [[ -n $abs_dir ]]; then
+			dest_dir=$abs_dir
+		else
+			rel=$(resolve_rel_dir "$rel")
+			dest_dir=$TARGET/$rel
+		fi
+		if [[ $DEDUPE -eq 1 ]]; then
+			DUP_MATCH=""
+			if find_duplicate "$src"; then
+				handle_duplicate "$src" "$DUP_MATCH"
+				continue
+			fi
+		fi
+		smart_move "$src" "$dest_dir" "$label"
+		if [[ $DEDUPE -eq 1 ]]; then
+			SEEN_HASH["$CUR_SIZE:$CUR_HASH"]=${LAST_DEST:-$src}
+		fi
+	done
+
+	prune_empty_source_dirs
+}
+
 move_one() {
-	local src=$1 cat=$2 is_dir=${3:-0}
-	local dest_dir=$TARGET/$cat
-	local dest size=0 name
+	local src=$1 cat=$2 is_dir=${3:-0} label=${4:-}
+	local dest_dir dest size=0 name
+	if [[ $cat == /* ]]; then
+		dest_dir=$cat
+	else
+		dest_dir=$TARGET/$cat
+	fi
 	name=$(basename -- "$src")
 	if [[ $RENAME -eq 1 && $is_dir -eq 0 ]]; then
 		name=$(rename_basename "$name")
@@ -729,7 +1322,7 @@ move_one() {
 		printf 'moved: %s -> %s\n' "$src" "$dest"
 	fi
 	log_move "$src" "$dest"
-	record_move "$cat" "$size"
+	record_move "${label:-$cat}" "$size"
 }
 
 trim() {
@@ -1149,6 +1742,10 @@ elif [[ -n $RULES_FILE ]]; then
 	die "rules file not found: $RULES_FILE"
 fi
 
+if [[ $SMART_MODE -eq 1 ]]; then
+	add_managed_dir Movies
+fi
+
 if [[ $DEDUPE -eq 1 ]]; then
 	if [[ $DUP_MODE == move ]]; then
 		add_managed_dir Duplicates
@@ -1187,6 +1784,11 @@ if [[ $RECURSIVE -eq 1 ]]; then
 		add_prune -path "$TARGET"
 	fi
 	for cat in "${CATEGORIES[@]}"; do
+		# Smart mode no longer owns these names: images/documents go to XDG
+		# user dirs and series live at the target root, so scan them normally.
+		if [[ $SMART_MODE -eq 1 && ($cat == Images || $cat == Documents || $cat == Videos) ]]; then
+			continue
+		fi
 		add_prune -path "$TARGET/$cat"
 	done
 	# Never descend into hidden directories when hidden files are excluded.
@@ -1207,7 +1809,9 @@ else
 	done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 fi
 
-if ((${#files[@]} > 0)); then
+if [[ $SMART_MODE -eq 1 ]]; then
+	smart_organize
+elif ((${#files[@]} > 0)); then
 	for src in "${files[@]}"; do
 		[[ -e $src || -L $src ]] || continue
 		base=$(basename -- "$src")

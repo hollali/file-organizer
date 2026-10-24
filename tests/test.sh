@@ -258,4 +258,68 @@ expect_file a.png
 expect_file Documents/b.pdf
 rm -rf "$XDG_CONFIG_HOME/organize"
 
+printf 'smart media mode\n'
+mkdir -p "$ROOT/smart/Show/Season 1" "$ROOT/smart/Show/Season 2" "$ROOT/smart/Inception (2010)"
+workdir smart
+printf 'ep1' >"Show.S01E01.mkv"
+printf 'sub1' >"Show.S01E01.en.srt"
+printf 'ep1b' >"Show/Season 1/Episode 02.mkv"
+printf 'ep2' >"Show/Season 2/Episode 01.mkv"
+printf 'bb1' >"Breaking.Bad.S01E02.mkv"
+printf 'movie' >"Inception (2010)/Inception.2010.1080p.BluRay.mkv"
+printf 'msub' >"Inception (2010)/Inception.2010.1080p.BluRay.en.srt"
+printf 'art' >"Inception (2010)/poster.jpg"
+printf 'art' >"Show/Season 1/folder.jpg"
+printf 'report' >report.pdf
+printf 'notes' >notes.txt
+printf 'pic' >photo.jpg
+printf 'junk' >sample.mkv
+out=$(run --smart . 2>&1) || fail "smart run failed: $out"
+expect_file "Show/Season 1/Show.S01E01.mkv"
+expect_file "Show/Season 1/Show.S01E01.en.srt"
+expect_file "Show/Season 1/Episode 02.mkv"
+expect_file "Show/Season 2/Episode 01.mkv"
+expect_file "Breaking Bad/Season 01/Breaking.Bad.S01E02.mkv"
+expect_file "Movies/Inception (2010)/Inception.2010.1080p.BluRay.mkv"
+expect_file "Movies/Inception (2010)/Inception.2010.1080p.BluRay.en.srt"
+expect_file "Movies/Inception (2010)/poster.jpg"
+expect_file "Show/Season 1/folder.jpg"
+expect_file "$HOME/Documents/PDF/report.pdf"
+expect_file "$HOME/Documents/Text/notes.txt"
+expect_file "$HOME/Pictures/$(date +%Y/%m)/photo.jpg"
+expect_file sample.mkv
+expect_absent "Show/Season 01"
+expect_absent "Inception (2010)"
+expect_contains "$out" "left in place (unidentified video)"
+
+printf 'smart mode avoids duplicate files\n'
+printf 'ep1' >"Show.S01E01.mkv"
+out=$(run --smart . 2>&1) || fail "smart duplicate run failed: $out"
+expect_contains "$out" "duplicate (skipped)"
+expect_file "Show/Season 1/Show.S01E01.mkv"
+expect_absent "Show/Season 1/Show.S01E01 (1).mkv"
+
+printf 'smart mode honors explicit rules\n'
+mkdir -p "$ROOT/smartrules"
+workdir smartrules
+printf '*.mkv -> Custom\n' >rules.conf
+printf 'x' >Show.S01E01.mkv
+run --smart --rules rules.conf . >/dev/null 2>&1 || fail "smart rules run failed"
+expect_file Custom/Show.S01E01.mkv
+expect_absent Videos
+
+printf 'smart mode reuses existing case-insensitive folders\n'
+mkdir -p "$ROOT/smartreuse/SHOW/season 01"
+workdir smartreuse
+printf 'x' >Show.S01E01.mkv
+run --smart . >/dev/null 2>&1 || fail "smart reuse run failed"
+expect_file "SHOW/season 01/Show.S01E01.mkv"
+expect_absent Videos
+
+printf 'smart mode undo\n'
+workdir smart
+run -u . >/dev/null 2>&1 || fail "smart undo failed"
+expect_file "Show.S01E01.en.srt"
+expect_file "Inception (2010)/Inception.2010.1080p.BluRay.mkv"
+
 printf 'All tests passed.\n'

@@ -2,13 +2,17 @@
 
 A small, dependency-light Bash script that organizes directory contents into
 category folders. It supports extension-based categories, TV episode grouping,
-date folders, custom rules, duplicate detection, undo, and dry runs.
+a smart series/season/movie media mode, date folders, custom rules, duplicate
+detection, undo, and dry runs.
 
 ## Features
 
 - Sorts files into `Images`, `Documents`, `Videos`, `Audio`, `Archives`,
   `Disk Images`, `Code`, `Fonts`, `Executables`, and `Other`
 - Optional TV mode: groups episodes as `Videos/Show/Season NN/`
+- Smart media mode: recursively identifies TV series, seasons, movies,
+  images, documents, and music, reuses existing folders, and moves sidecar
+  subtitles/artwork with their video
 - Optional music mode: groups tracks as `Audio/Artist/Album/`
 - Optional date sorting: `Category/YYYY/MM/`
 - Custom rules file for glob-based destinations and custom category definitions
@@ -32,6 +36,7 @@ date folders, custom rules, duplicate detection, undo, and dry runs.
 - `find`, `mv`, `mkdir`, `rm`, `basename`, `dirname`, `date`, `tr`, `stat`,
   `sort` (provided by GNU coreutils/findutils or BusyBox)
 - `sha256sum` (or `shasum`/`sha256`) only when using `--dedupe`
+- `cmp` (diffutils) only when using `--smart` to detect identical files
 - `exiftool` is optional; when present, `--by-date` uses EXIF dates for images
   and `--music` reads artist/album tags
 
@@ -96,6 +101,7 @@ You can check dependencies with:
 | `-r, --recursive` | Include files from subdirectories (flattened into categories) |
 | `-F, --folders` | Also move top-level subdirectories into `Folders/` |
 | `-T, --tv` | Group episode files as `Videos/Show/Season NN/` |
+| `--smart`, `--media` | Smart media mode (implies `--recursive`) |
 | `-M, --music` | Group tracks as `Audio/Artist/Album/` |
 | `-H, --hidden` | Include hidden files (and hidden directories in recursive mode) |
 | `-n, --dry-run` | Show what would be moved without changing anything |
@@ -145,6 +151,70 @@ The show name is taken from the text before the marker; dots and underscores
 become spaces. Files that do not match any pattern are still placed in the
 regular `Videos/` folder, and all non-video files are organized as usual.
 TV matches are not given date subfolders when `--by-date` is also enabled.
+
+### Smart media mode
+
+`--smart` (or `--media`) recursively inspects the whole tree, including
+existing folders, and builds a proper media library instead of dumping files
+into flat categories:
+
+```
+Breaking Bad/
+  Season 01/
+    Breaking.Bad.S01E01.mkv
+    Breaking.Bad.S01E01.en.srt
+  Season 02/
+    Breaking.Bad.S02E01.mkv
+Movies/
+  Inception (2010)/
+    Inception.2010.1080p.BluRay.mkv
+    Inception.2010.1080p.BluRay.en.srt
+Audio/
+  Artist/
+    Album/
+```
+
+Images and documents go to the system's XDG user directories instead of
+inside the organized folder:
+
+```
+~/Pictures/
+  2024/05/
+~/Documents/
+  PDF/
+  Text/
+```
+
+- Episodes are detected from `SxxExx`, `NxNN`, `Season X Episode Y`,
+  `Season X`, `Sxx`, `Exx`/`Episode X`, bare episode numbers inside a season
+  folder, and `Show - 01 - Title` names inside a season folder. When the file
+  name omits the show or season, ancestor folders such as
+  `Show/Season 2/` are used.
+- Movies are detected from video files that are not episodes. A title is
+  derived from the file name, and a four-digit year (for example
+  `(2010)` or `.2010.`) is included as `Title (Year)` when present.
+- Images are placed in `XDG_PICTURES_DIR` (usually `~/Pictures`) under
+  `YYYY/MM`, and documents in `XDG_DOCUMENTS_DIR` (usually `~/Documents`)
+  under a type folder such as `PDF` or `Text`. The environment variables are
+  honored first, then `xdg-user-dir`, then the conventional `~/Pictures` and
+  `~/Documents` fallbacks.
+- Subtitles (`srt`, `ass`, `vtt`, `sub`, ...), `.nfo` files, and artwork whose
+  names match an episode or movie are moved into the same destination folder.
+- Only seasons that actually contain files are created. Existing series,
+  season, and movie folders are reused case-insensitively, so
+  `show/season 01` is not duplicated as `Show/Season 01`.
+- Existing folders are split when they contain multiple shows or seasons.
+  Folders emptied by the move are removed.
+- Identical files already in the destination are skipped as duplicates;
+  different files with the same name get the usual `name (1).ext` collision
+  suffix. Nothing is overwritten.
+- Files that cannot be identified confidently are left in place. In
+  particular, obvious samples/trailers and videos without a usable title are
+  not placed inside a known series or movie folder.
+- Rules (`--rules`) still take precedence over automatic media destinations.
+- `--smart` implies `--recursive`; `-F/--folders` is not needed.
+
+Use `--dry-run` first to review every proposed destination.
 
 ### Music mode
 
@@ -390,6 +460,14 @@ Preview the same operation first:
 
 ```sh
 ./organize.sh --tv --dry-run ~/Downloads
+```
+
+Build a full media library from a mixed downloads tree (series, seasons,
+movies, subtitles, images, documents, music):
+
+```sh
+./organize.sh --smart --dry-run ~/Downloads
+./organize.sh --smart ~/Downloads
 ```
 
 Group by year and month:
