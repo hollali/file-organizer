@@ -367,3 +367,7 @@ expect_file stray.srt
 expect_file "Rome Trip/lonely.srt"
 expect_contains "$out" "left in place"
 expect_contains "$out" "no matching video for sidecar"
+
+printf 'menu requires a terminal\n'
+out=$(run --menu . </dev/null 2>&1) || true
+expect_contains "$out" "--menu requires an interactive terminal"

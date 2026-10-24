@@ -8,7 +8,7 @@
 # Usage: ./organize.sh [options] [directory]
 #
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 set -euo pipefail
 
@@ -22,6 +22,7 @@ UNDO=0
 TV_MODE=0
 MUSIC_MODE=0
 SMART_MODE=0
+MENU=0
 BY_DATE=0
 DEDUPE=0
 DUP_MODE=skip
@@ -92,6 +93,8 @@ Options:
   -T, --tv           Group TV episodes as Videos/Show/Season NN/;
                      unrecognized videos stay in place
   -M, --music        Group tracks as Audio/Artist/Album/ (tags or "Artist - Album - N - Title")
+      --menu         Interactive menu (whiptail): pick a directory, mode and
+                     options, preview the plan, apply it, undo, or schedule runs
       --smart        Smart media mode: recursively inspect every file and folder,
                      then build Show/Season NN/, Movies/Title (Year)/,
                      Audio/Artist/Album/, date folders in ~/Pictures, and
@@ -242,6 +245,10 @@ while (($# > 0)); do
 	--smart | --media)
 		SMART_MODE=1
 		RECURSIVE=1
+		shift
+		;;
+	--menu | --gui | --interactive)
+		MENU=1
 		shift
 		;;
 	-H | --hidden)
@@ -1809,8 +1816,197 @@ print_summary() {
 	fi
 }
 
+# ---------------- interactive menu (--menu, whiptail) ----------------
+
+ui_cols() {
+	tput cols 2>/dev/null || printf 80
+}
+ui_rows() {
+	tput lines 2>/dev/null || printf 24
+}
+ui_size() {
+	local w h
+	w=$(ui_cols)
+	h=$(ui_rows)
+	((w > 100)) && w=100
+	((w < 46)) && w=46
+	((h > 26)) && h=26
+	((h < 8)) && h=8
+	UIW=$w
+	UIH=$h
+}
+
+menu_msg() {
+	ui_size
+	whiptail --title "organize.sh ${VERSION}" --msgbox "$1" "$UIH" "$UIW" || true
+}
+
+# Run organize.sh with ARGS in a fresh, non-interactive pass and show the
+# captured output in a scrollable text box. Output is always shown, even when
+# the run fails, so errors are visible inside the menu.
+menu_run() {
+	local file status=0
+	file=$(mktemp "${TMPDIR:-/tmp}/organize-menu-XXXXXX")
+	bash "$SCRIPT_PATH" "$@" >"$file" 2>&1 || status=$?
+	ui_size
+	whiptail --title "organize.sh ${VERSION}" --textbox "$file" "$UIH" "$UIW" || true
+	rm -f -- "$file"
+	return 0
+}
+
+menu_pick_directory() {
+	local dir=$1 out
+	while :; do
+		if ! out=$(whiptail --title "Directory" --inputbox \
+			"Directory to organize:" 10 "$UIW" "$dir" 3>&1 1>&2 2>&3); then
+			return 1
+		fi
+		dir=$(trim "${out//\"/}")
+		if [[ -z $dir ]]; then
+			dir=$PWD
+		elif [[ -d $dir ]]; then
+			dir=$(cd -- "$dir" && pwd)
+			printf '%s\n' "$dir"
+			return 0
+		fi
+		menu_msg "Not a directory: $dir"
+	done
+}
+
+menu_main() {
+	local dir=$1 choice mode pref out dup preview args opt
+	ui_size
+	while :; do
+		if ! choice=$(whiptail --title "organize.sh ${VERSION} - interactive menu" --menu \
+			"Working directory: $dir" "$UIH" "$UIW" 0 \
+			dir "Change directory" \
+			organize "Organize files (sort, media, music...)" \
+			undo "Undo the last organize in this directory" \
+			doctor "Dependency check" \
+			schedule "Schedule a daily run for this directory" \
+			unschedule "Remove the scheduled run" \
+			quit "Exit" 3>&1 1>&2 2>&3); then
+			return 0
+		fi
+		choice=${choice//\"/}
+		case $choice in
+		quit)
+			return 0
+			;;
+		dir)
+			if out=$(menu_pick_directory "$dir"); then
+				dir=$out
+			fi
+			;;
+		undo)
+			menu_run -u "$dir"
+			;;
+		doctor)
+			menu_run --doctor
+			;;
+		schedule)
+			if out=$(whiptail --title "Daily schedule" --inputbox \
+				"Run organize.sh daily at (HH:MM) for:" 10 "$UIW" "09:00" 3>&1 1>&2 2>&3); then
+				menu_run --schedule "${out//\"/}@$dir"
+			fi
+			;;
+		unschedule)
+			menu_run --unschedule
+			;;
+		organize)
+			if ! out=$(whiptail --title "Mode" --radiolist \
+				"How should files be organized?" "$UIH" "$UIW" 0 \
+				smart "Smart media mode: series/seasons, movies, XDG Pictures/Docs..." "ON" \
+				tv "TV episodes only: Videos/Show/Season NN" "OFF" \
+				music "Music mode: Audio/Artist/Album" "OFF" \
+				classic "Sort by file type only (Images/, Documents/...)" "OFF" \
+				3>&1 1>&2 2>&3); then
+				continue
+			fi
+			mode=${out//\"/}
+
+			if ! pref=$(whiptail --title "Options" --checklist \
+				"Toggle extra options (space to select, enter to confirm)" \
+				"$UIH" "$UIW" 0 \
+				dry-run "Preview first, then confirm" "ON" \
+				recursive "Include subdirectories" "OFF" \
+				folders "Also move top-level folders" "OFF" \
+				hidden "Include hidden files" "OFF" \
+				by-date "Group into Category/YYYY/MM" "OFF" \
+				rename "Normalize filenames while moving" "OFF" \
+				dedupe "Detect duplicate files" "OFF" \
+				3>&1 1>&2 2>&3); then
+				continue
+			fi
+			pref=${pref//\"/}
+
+			dup="none"
+			if [[ $pref == *dedupe* ]]; then
+				if ! out=$(whiptail --title "Duplicates" --radiolist \
+					"How should duplicate files be handled?" "$UIH" "$UIW" 0 \
+					skip "Keep the first copy, skip the rest" "ON" \
+					move "Move duplicates to Duplicates/" "OFF" \
+					delete "Delete duplicates" "OFF" \
+					trash "Trash duplicates (recoverable)" "OFF" \
+					3>&1 1>&2 2>&3); then
+					continue
+				fi
+				dup=${out//\"/}
+			fi
+
+			preview=0
+			[[ $pref == *dry-run* ]] && preview=1
+
+			args=()
+			case $mode in
+			smart) args+=(--smart) ;;
+			tv) args+=(--tv) ;;
+			music) args+=(--music) ;;
+			esac
+			for opt in recursive folders hidden by-date rename; do
+				if [[ $pref == *"$opt"* ]]; then
+					case $opt in
+					recursive) args+=(-r) ;;
+					folders) args+=(-F) ;;
+					hidden) args+=(-H) ;;
+					by-date) args+=(--by-date) ;;
+					rename) args+=(--rename) ;;
+					esac
+				fi
+			done
+			case $dup in
+			skip) args+=(--duplicates skip) ;;
+			delete) args+=(--duplicates delete) ;;
+			move) args+=(--duplicates move) ;;
+			trash) args+=(--duplicates trash) ;;
+			esac
+
+			if ((preview)); then
+				menu_run "${args[@]}" -n "$dir"
+				if whiptail --title "Apply changes?" --yesno \
+					"Apply these changes for real (no dry run)?" "$UIH" "$UIW"; then
+					menu_run "${args[@]}" "$dir"
+				fi
+			else
+				menu_run "${args[@]}" "$dir"
+			fi
+			;;
+		esac
+		# Refresh the displayed directory after organizer runs.
+		dir=$(cd -- "$dir" && pwd)
+	done
+}
+
 if [[ $UNDO -eq 1 ]]; then
 	undo_last
+	exit 0
+fi
+
+if [[ $MENU -eq 1 ]]; then
+	[[ -t 0 ]] || die "--menu requires an interactive terminal (tty)"
+	command -v whiptail >/dev/null 2>&1 || \
+		die "whiptail is required for --menu (install it with your package manager)"
+	menu_main "$DIR"
 	exit 0
 fi
 

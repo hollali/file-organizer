@@ -18,6 +18,8 @@ detection, undo, and dry runs.
   and moves sidecar subtitles/artwork with their video
 - Optional music mode: groups tracks as `Audio/Artist/Album/`
 - Optional date sorting: `Category/YYYY/MM/`
+- Optional interactive menu (`--menu`): pick a directory, mode, and options in
+  a whiptail dialog right in the terminal, preview the plan, then apply
 - Custom rules file for glob-based destinations and custom category definitions
 - Duplicate detection using size and SHA-256 checksums, with skip, move,
   delete, or trash handling
@@ -243,6 +245,7 @@ changed until step 5.
 | `-T, --tv` | Group episode files as `Videos/Show/Season NN/` (others stay in place) |
 | `--smart`, `--media` | Smart media mode (implies `--recursive`) |
 | `-M, --music` | Group tracks as `Audio/Artist/Album/` |
+| `--menu`, `--gui` | Interactive whiptail menu (see below) |
 | `-H, --hidden` | Include hidden files (and hidden directories in recursive mode) |
 | `-n, --dry-run` | Show what would be moved without changing anything |
 | `-u, --undo` | Undo the most recent run in the given directory |
@@ -292,6 +295,32 @@ become spaces. Videos are never dumped into a flat folder: matches go to
 `Videos/Show/Season NN/`, and files that do not match any pattern stay in
 place. All non-video files are organized as usual. TV matches are not given
 date subfolders when `--by-date` is also enabled.
+
+### Interactive menu
+
+If you would rather click through the organizer than memorize flags, run:
+
+```sh
+./organize.sh --menu ~/Downloads
+```
+
+This opens a whiptail dialog in the terminal (needs `whiptail`, which is part
+of `libnewt` and preinstalled on Linux Mint and most Debian/Ubuntu images) and
+walks through everything the CLI does:
+
+1. **Change directory** to the folder you want to organize.
+2. **Organize files** - choose a mode (`--smart`, `--tv`, `--music`, or the
+   plain category sort), toggle `--dry-run`, `--recursive`, `--folders`,
+   `--hidden`, `--by-date`, `--rename`, and `--dedupe`, and pick a duplicate
+   policy when dedupe is enabled. The plan is previewed first; applying it
+   needs a second confirmation.
+3. **Undo** - revert the last organize in the chosen directory.
+4. **Dependency check / schedule / unschedule** - the same as the `--doctor`,
+   `--schedule`, and `--unschedule` options.
+
+`--menu` requires an interactive terminal; in scripts or cron jobs use the
+plain options. As with everything else in this section, the menu never touches
+anything before you confirm.
 
 ### Smart media mode
 
