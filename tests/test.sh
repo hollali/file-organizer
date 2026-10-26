@@ -368,6 +368,40 @@ expect_file "Rome Trip/lonely.srt"
 expect_contains "$out" "left in place"
 expect_contains "$out" "no matching video for sidecar"
 
+printf 'schedule multiple times per day\n'
+mkdir -p "$ROOT/bin" "$ROOT/sched"
+cat >"$ROOT/bin/crontab" <<'STUB'
+#!/usr/bin/env bash
+file=${CRONTAB_FILE:?}
+case ${1:-} in
+-l) if [[ -f $file ]]; then cat "$file"; else exit 1; fi ;;
+-) cat >"$file" ;;
+*) exit 2 ;;
+esac
+STUB
+chmod +x "$ROOT/bin/crontab"
+ln -sf "$SCRIPT" "$ROOT/bin/organize"
+export PATH="$ROOT/bin:$PATH"
+export CRONTAB_FILE="$ROOT/crontab.txt"
+printf 'existing job\n' >"$CRONTAB_FILE"
+workdir sched
+touch keep.png
+out=$(run --schedule '08:00,09:30,18:00@.' 2>&1) || fail "schedule failed: $out"
+expect_file keep.png
+expect_absent Images
+expect_contains "$out" "Scheduled: 08:00, 09:30, 18:00 daily"
+expect_contains "$(cat "$CRONTAB_FILE")" "existing job"
+expect_contains "$(cat "$CRONTAB_FILE")" "0 8 * * * $ROOT/bin/organize $ROOT/sched #organize-cron"
+expect_contains "$(cat "$CRONTAB_FILE")" "30 9 * * * $ROOT/bin/organize $ROOT/sched #organize-cron"
+expect_contains "$(cat "$CRONTAB_FILE")" "0 18 * * * $ROOT/bin/organize $ROOT/sched #organize-cron"
+[[ $(grep -c '#organize-cron' "$CRONTAB_FILE") -eq 3 ]] || fail "expected 3 cron lines"
+out=$(run --schedule '06:00@.' 2>&1) || fail "reschedule failed: $out"
+[[ $(grep -c '#organize-cron' "$CRONTAB_FILE") -eq 1 ]] || fail "reschedule did not replace jobs"
+out=$(run --unschedule 2>&1) || fail "unschedule failed: $out"
+expect_contains "$out" "Removed scheduled job"
+expect_contains "$(cat "$CRONTAB_FILE")" "existing job"
+[[ $(grep -c '#organize-cron' "$CRONTAB_FILE") -eq 0 ]] || fail "unschedule left cron lines"
+
 printf 'menu requires a terminal\n'
 out=$(run --menu . </dev/null 2>&1) || true
 expect_contains "$out" "--menu requires an interactive terminal"

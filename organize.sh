@@ -8,7 +8,7 @@
 # Usage: ./organize.sh [options] [directory]
 #
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 set -euo pipefail
 
@@ -125,7 +125,8 @@ Options:
       --version      Show version and exit
       --doctor       Check for required and optional dependencies
       --install-deps Attempt to install missing dependencies (requires sudo)
-      --schedule TIME[D@DIR] Schedule to run daily at TIME (HH:MM) for DIR (e.g. 09:00@~/Downloads)
+      --schedule TIMES[@DIR] Schedule daily runs at TIMES (HH:MM[,HH:MM...]) for DIR
+                     (e.g. 09:00,15:00,21:00@~/Downloads)
       --unschedule   Remove scheduled cron job
   -h, --help         Show this help
 EOF
@@ -467,6 +468,67 @@ DIR=$(cd -- "$DIR" && pwd)
 TARGET=${TARGET:-$DIR}
 [[ -d $TARGET ]] || mkdir -p -- "$TARGET"
 TARGET=$(cd -- "$TARGET" && pwd)
+
+if ((UNSCHEDULE)); then
+	if ! command -v crontab >/dev/null; then
+		die "crontab not found"
+	fi
+	CRONTAB_EXISTING=$(crontab -l 2>/dev/null || true)
+	if [[ $CRONTAB_EXISTING == *"#organize-cron"* ]]; then
+		printf '%s\n' "$CRONTAB_EXISTING" | grep -v "organize.*#organize-cron" | crontab - || true
+		echo "Removed scheduled job"
+	else
+		echo "No scheduled job found"
+	fi
+	exit 0
+fi
+
+if [[ -n $SCHEDULE ]]; then
+	if [[ $SCHEDULE == *"@"* ]]; then
+		SCHEDULE_TIME=${SCHEDULE%%@*}
+		SCHEDULE_DIR_ARG=${SCHEDULE##*@}
+	else
+		SCHEDULE_TIME=$SCHEDULE
+		SCHEDULE_DIR_ARG=$DIR
+	fi
+	SCHEDULE_DIR_ARG=$(eval echo "$SCHEDULE_DIR_ARG")
+	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
+	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
+	ORG_BIN=$(command -v organize 2>/dev/null || echo "$SCRIPT_PATH")
+	if ! command -v crontab >/dev/null; then
+		die "crontab not found; install cron or use systemd timer"
+	fi
+	IFS=',' read -r -a SCHEDULE_TIMES <<<"$SCHEDULE_TIME"
+	CRON_LINES=()
+	SCHEDULE_LABELS=()
+	for schedule_time in "${SCHEDULE_TIMES[@]}"; do
+		if [[ ! $schedule_time =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+			die "invalid time format: $schedule_time (use HH:MM, comma-separated)"
+		fi
+		SCHEDULE_HOUR=$((10#${BASH_REMATCH[1]}))
+		SCHEDULE_MIN=$((10#${BASH_REMATCH[2]}))
+		if ((SCHEDULE_HOUR > 23 || SCHEDULE_MIN > 59)); then
+			die "invalid time: $schedule_time"
+		fi
+		CRON_LINES+=("$(printf '%d %d * * * %s %s #organize-cron' "$SCHEDULE_MIN" "$SCHEDULE_HOUR" "$ORG_BIN" "$SCHEDULE_DIR_ARG")")
+		SCHEDULE_LABELS+=("$(printf '%02d:%02d' "$SCHEDULE_HOUR" "$SCHEDULE_MIN")")
+	done
+	CRONTAB_EXISTING=$(crontab -l 2>/dev/null | grep -v "organize.*#organize-cron" || true)
+	{
+		if [[ -n $CRONTAB_EXISTING ]]; then
+			printf '%s\n' "$CRONTAB_EXISTING"
+		fi
+		printf '%s\n' "${CRON_LINES[@]}"
+	} | crontab -
+	SCHEDULE_LABEL_LIST=""
+	for schedule_label in "${SCHEDULE_LABELS[@]}"; do
+		[[ -n $SCHEDULE_LABEL_LIST ]] && SCHEDULE_LABEL_LIST+=", "
+		SCHEDULE_LABEL_LIST+=$schedule_label
+	done
+	echo "Scheduled: $SCHEDULE_LABEL_LIST daily for $SCHEDULE_DIR_ARG"
+	echo "To remove: $ORG_BIN --unschedule"
+	exit 0
+fi
 
 LOG=""
 
@@ -2176,49 +2238,6 @@ if [[ -n $LOG ]]; then
 fi
 
 print_summary
-
-if ((UNSCHEDULE)); then
-	if ! command -v crontab >/dev/null; then
-		die "crontab not found"
-	fi
-	if crontab -l 2>/dev/null | grep -q "organize.*#organize-cron"; then
-		crontab -l 2>/dev/null | grep -v "organize.*#organize-cron" | crontab -
-		echo "Removed scheduled job"
-	else
-		echo "No scheduled job found"
-	fi
-	exit 0
-fi
-
-if [[ -n $SCHEDULE ]]; then
-	if [[ $SCHEDULE == *"@"* ]]; then
-		SCHEDULE_TIME=${SCHEDULE%%@*}
-		SCHEDULE_DIR_ARG=${SCHEDULE##*@}
-	else
-		SCHEDULE_TIME=$SCHEDULE
-		SCHEDULE_DIR_ARG=${DIR:-.}
-	fi
-	if [[ ! $SCHEDULE_TIME =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
-		die "invalid time format, use HH:MM (e.g., 09:00)"
-	fi
-	SCHEDULE_HOUR=${BASH_REMATCH[1]}
-	SCHEDULE_MIN=${BASH_REMATCH[2]}
-	if ((SCHEDULE_HOUR < 0 || SCHEDULE_HOUR > 23 || SCHEDULE_MIN < 0 || SCHEDULE_MIN > 59)); then
-		die "invalid time"
-	fi
-	SCHEDULE_DIR_ARG=$(eval echo "$SCHEDULE_DIR_ARG")
-	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
-	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
-	ORG_BIN=$(command -v organize 2>/dev/null || echo "$SCRIPT_PATH")
-	if ! command -v crontab >/dev/null; then
-		die "crontab not found; install cron or use systemd timer"
-	fi
-	CRON_LINE="$SCHEDULE_MIN $SCHEDULE_HOUR * * * $ORG_BIN $SCHEDULE_DIR_ARG #organize-cron"
-	(crontab -l 2>/dev/null | grep -v "organize.*#organize-cron"; echo "$CRON_LINE") | crontab -
-	echo "Scheduled: $SCHEDULE_HOUR:$(printf '%02d' $SCHEDULE_MIN) daily for $SCHEDULE_DIR_ARG"
-	echo "To remove: $ORG_BIN --unschedule"
-	exit 0
-fi
 
 doctor_deps() {
 	printf 'organize.sh %s - dependency check\n\n' "$VERSION"

@@ -222,14 +222,17 @@ changed until step 5.
    --exclude *.tmp
    ```
 
-9. **Optional: schedule daily organization.** This installs a cron job for
-   the given directory:
+9. **Optional: schedule automatic organization.** This installs one cron job
+   per time for the given directory:
 
    ```sh
    ./organize.sh --schedule 09:00@~/Downloads
+   ./organize.sh --schedule 00:00,06:00,12:00,18:00@~/Downloads
    ```
 
-   Remove it again with:
+   Times are comma-separated `HH:MM` values and run daily. Re-running
+   `--schedule` replaces the existing organize cron jobs. Remove them again
+   with:
 
    ```sh
    ./organize.sh --unschedule
@@ -263,6 +266,9 @@ changed until step 5.
 | `--rules FILE` | Load custom rules (default: `~/.config/organize/rules.conf`) |
 | `--config FILE` | Load default flags from a config file |
 | `--json` | Print the summary as JSON |
+| `--schedule TIMES[@DIR]` | Schedule daily cron runs at comma-separated `HH:MM` times |
+| `--unschedule` | Remove scheduled organize cron jobs |
+| `--doctor` | Check required and optional dependencies |
 | `-h, --help` | Show help |
 
 ### TV episode mode
