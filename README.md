@@ -89,6 +89,19 @@ You can check dependencies with:
 ./organize.sh --doctor
 ```
 
+To install missing requirements automatically with the detected package manager
+(uses `sudo`), run:
+
+```sh
+./organize.sh --install-deps
+```
+
+You can also print the current version:
+
+```sh
+./organize.sh --version
+```
+
 ## Usage
 
 ```sh
@@ -269,6 +282,8 @@ changed until step 5.
 | `--schedule TIMES[@DIR]` | Schedule daily cron runs at comma-separated `HH:MM` times |
 | `--unschedule` | Remove scheduled organize cron jobs |
 | `--doctor` | Check required and optional dependencies |
+| `--install-deps` | Install missing dependencies with the detected package manager |
+| `--version` | Show the version and exit |
 | `-h, --help` | Show help |
 
 ### TV episode mode
