@@ -14,6 +14,27 @@ set -euo pipefail
 
 SCRIPT_PATH=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
 
+acquire_lock() {
+	local lockdir
+	lockdir="${TMPDIR:-/tmp}/organize.lock.$(printf '%s' "$DIR" | sha256sum 2>/dev/null | awk '{print $1}' || echo $$)"
+	if command -v flock >/dev/null 2>&1; then
+		exec 200>"$lockdir"
+		if ! flock -n 200 2>/dev/null; then
+			die "another organize.sh instance is running on $DIR"
+		fi
+	else
+		if [[ -f "$lockdir.pid" ]]; then
+			local oldpid
+			oldpid=$(cat "$lockdir.pid" 2>/dev/null || true)
+			if [[ -n $oldpid ]] && kill -0 "$oldpid" 2>/dev/null; then
+				die "another organize.sh instance is running on $DIR"
+			fi
+		fi
+		printf '%s\n' $$ >"$lockdir.pid"
+		trap 'rm -f "$lockdir.pid" 2>/dev/null' EXIT
+	fi
+}
+
 DRY_RUN=0
 RECURSIVE=0
 MOVE_FOLDERS=0
@@ -309,7 +330,8 @@ while (($# > 0)); do
 	--doctor)
 		(
 			printf 'organize.sh %s - dependency check\n\n' "$VERSION"
-			ok=0; warn=0
+			ok=0
+			warn=0
 			if command -v bash >/dev/null && bash --version | grep -q 'version [4-9]\|version 10'; then
 				printf '  [OK] bash %s\n' "$(bash --version | head -n1 | awk '{print $4}')"
 				ok=$((ok + 1))
@@ -491,7 +513,10 @@ if [[ -n $SCHEDULE ]]; then
 		SCHEDULE_TIME=$SCHEDULE
 		SCHEDULE_DIR_ARG=$DIR
 	fi
-	SCHEDULE_DIR_ARG=$(eval echo "$SCHEDULE_DIR_ARG")
+	case "$SCHEDULE_DIR_ARG" in
+	"~") SCHEDULE_DIR_ARG=$HOME ;;
+	"~/"*) SCHEDULE_DIR_ARG=$HOME/${SCHEDULE_DIR_ARG#\~/} ;;
+	esac
 	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
 	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
 	ORG_BIN=$(command -v organize 2>/dev/null || echo "$SCRIPT_PATH")
@@ -510,7 +535,7 @@ if [[ -n $SCHEDULE ]]; then
 		if ((SCHEDULE_HOUR > 23 || SCHEDULE_MIN > 59)); then
 			die "invalid time: $schedule_time"
 		fi
-		CRON_LINES+=("$(printf '%d %d * * * %s %s #organize-cron' "$SCHEDULE_MIN" "$SCHEDULE_HOUR" "$ORG_BIN" "$SCHEDULE_DIR_ARG")")
+		CRON_LINES+=("$(printf '%d %d * * * %s %s #organize-cron' "$SCHEDULE_MIN" "$SCHEDULE_HOUR" "$(printf '%q' "$ORG_BIN")" "$(printf '%q' "$SCHEDULE_DIR_ARG")")")
 		SCHEDULE_LABELS+=("$(printf '%02d:%02d' "$SCHEDULE_HOUR" "$SCHEDULE_MIN")")
 	done
 	CRONTAB_EXISTING=$(crontab -l 2>/dev/null | grep -v "organize.*#organize-cron" || true)
@@ -526,9 +551,11 @@ if [[ -n $SCHEDULE ]]; then
 		SCHEDULE_LABEL_LIST+=$schedule_label
 	done
 	echo "Scheduled: $SCHEDULE_LABEL_LIST daily for $SCHEDULE_DIR_ARG"
-	echo "To remove: $ORG_BIN --unschedule"
+	echo "To remove: $(printf '%q' "$ORG_BIN") --unschedule"
 	exit 0
 fi
+
+acquire_lock
 
 LOG=""
 
@@ -2060,6 +2087,7 @@ menu_main() {
 }
 
 if [[ $UNDO -eq 1 ]]; then
+	acquire_lock
 	undo_last
 	exit 0
 fi
@@ -2068,6 +2096,7 @@ if [[ $MENU -eq 1 ]]; then
 	[[ -t 0 ]] || die "--menu requires an interactive terminal (tty)"
 	command -v whiptail >/dev/null 2>&1 || \
 		die "whiptail is required for --menu (install it with your package manager)"
+	acquire_lock
 	menu_main "$DIR"
 	exit 0
 fi
@@ -2239,6 +2268,55 @@ fi
 
 print_summary
 
+<<<<<<< HEAD
+=======
+if ((UNSCHEDULE)); then
+	if ! command -v crontab >/dev/null; then
+		die "crontab not found"
+	fi
+	if crontab -l 2>/dev/null | grep -q "organize.*#organize-cron"; then
+		crontab -l 2>/dev/null | grep -v "organize.*#organize-cron" | crontab -
+		echo "Removed scheduled job"
+	else
+		echo "No scheduled job found"
+	fi
+	exit 0
+fi
+
+if [[ -n $SCHEDULE ]]; then
+	if [[ $SCHEDULE == *"@"* ]]; then
+		SCHEDULE_TIME=${SCHEDULE%%@*}
+		SCHEDULE_DIR_ARG=${SCHEDULE##*@}
+	else
+		SCHEDULE_TIME=$SCHEDULE
+		SCHEDULE_DIR_ARG=${DIR:-.}
+	fi
+	if [[ ! $SCHEDULE_TIME =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+		die "invalid time format, use HH:MM (e.g., 09:00)"
+	fi
+	SCHEDULE_HOUR=${BASH_REMATCH[1]}
+	SCHEDULE_MIN=${BASH_REMATCH[2]}
+	if ((SCHEDULE_HOUR < 0 || SCHEDULE_HOUR > 23 || SCHEDULE_MIN < 0 || SCHEDULE_MIN > 59)); then
+		die "invalid time"
+	fi
+	case "$SCHEDULE_DIR_ARG" in
+	"~") SCHEDULE_DIR_ARG=$HOME ;;
+	"~/"*) SCHEDULE_DIR_ARG=$HOME/${SCHEDULE_DIR_ARG#\~/} ;;
+	esac
+	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
+	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
+	ORG_BIN=$(command -v organize 2>/dev/null || echo "$SCRIPT_PATH")
+	if ! command -v crontab >/dev/null; then
+		die "crontab not found; install cron or use systemd timer"
+	fi
+	CRON_LINE="$SCHEDULE_MIN $SCHEDULE_HOUR * * * $(printf '%q' "$ORG_BIN") $(printf '%q' "$SCHEDULE_DIR_ARG") #organize-cron"
+	(crontab -l 2>/dev/null | grep -v "organize.*#organize-cron"; echo "$CRON_LINE") | crontab -
+	echo "Scheduled: $SCHEDULE_HOUR:$(printf '%02d' $SCHEDULE_MIN) daily for $SCHEDULE_DIR_ARG"
+	echo "To remove: $(printf '%q' "$ORG_BIN") --unschedule"
+	exit 0
+fi
+
+>>>>>>> ac1d1ef (Add directory locking and safer cron scheduling; update docs)
 doctor_deps() {
 	printf 'organize.sh %s - dependency check\n\n' "$VERSION"
 	local ok=0 warn=0

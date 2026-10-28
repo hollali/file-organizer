@@ -32,6 +32,7 @@ detection, undo, and dry runs.
 - Dry-run mode to preview changes
 - Collision-safe: never overwrites, renames collisions as `name (1).ext`
 - Undo support backed by a log file
+- Prevents concurrent runs on the same directory with file locking
 - Skips hidden files (and hidden directories in recursive mode) by default
 - No external dependencies beyond Bash and standard tools
 
@@ -244,8 +245,9 @@ changed until step 5.
    ```
 
    Times are comma-separated `HH:MM` values and run daily. Re-running
-   `--schedule` replaces the existing organize cron jobs. Remove them again
-   with:
+   `--schedule` replaces the existing organize cron jobs. Tilde paths are
+   expanded; paths and the script are safely quoted in the cron entry. Remove
+   them again with:
 
    ```sh
    ./organize.sh --unschedule
@@ -782,6 +784,8 @@ release artifact through GitHub Releases.
   symlink behind instead, use `--link`.
 - `--rename` and `--link` apply to files only; `--folders` moves directories
   unchanged.
+- Only one `organize.sh` instance can run on a given directory at a time
+  (file locking). If another instance is already running, it exits with an error.
 - In recursive mode, files are flattened into categories under the target
   directory; the original subdirectories are left in place (and may become
   empty).
