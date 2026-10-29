@@ -46,6 +46,28 @@ expect_file .hidden
 expect_contains "$out" "Summary:"
 expect_contains "$out" "Total"
 
+printf 'version output\n'
+out=$(run --version 2>&1) || fail "--version failed: $out"
+expect_contains "$out" "organize.sh 1.3.0"
+
+printf 'doctor output\n'
+out=$(run --doctor 2>&1) || fail "--doctor failed: $out"
+expect_contains "$out" "organize.sh 1.3.0 - dependency check"
+expect_contains "$out" "Summary:"
+expect_contains "$out" "[OK]"
+
+printf 'dry run changes nothing\n'
+mkdir -p "$ROOT/dry"
+workdir dry
+touch a.png b.pdf
+out=$(run -n . 2>&1) || fail "dry run failed: $out"
+expect_contains "$out" "would move:"
+expect_contains "$out" "Summary (dry run):"
+expect_file a.png
+expect_file b.pdf
+expect_absent Images
+expect_absent Documents
+
 printf 'collision handling\n'
 mkdir -p "$ROOT/collide/a" "$ROOT/collide/b"
 workdir collide

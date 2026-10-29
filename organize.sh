@@ -158,6 +158,46 @@ die() {
 	exit 1
 }
 
+doctor_deps() {
+	printf 'organize.sh %s - dependency check\n\n' "$VERSION"
+	local ok=0 warn=0
+	if command -v bash >/dev/null && bash --version | grep -q 'version [4-9]\|version 10'; then
+		printf '  [OK] bash %s\n' "$(bash --version | head -n1 | awk '{print $4}')"
+		ok=$((ok + 1))
+	else
+		printf '  [WARN] bash version may be too old (need >= 4)\n'
+		warn=$((warn + 1))
+	fi
+	for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum; do
+		if command -v "$cmd" >/dev/null 2>&1; then
+			printf '  [OK] %s\n' "$cmd"
+			ok=$((ok + 1))
+		else
+			printf '  [WARN] %s not found\n' "$cmd"
+			warn=$((warn + 1))
+		fi
+	done
+	if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v sha256 >/dev/null 2>&1; then
+		printf '  [OK] SHA256 available (for --dedupe)\n'
+		ok=$((ok + 1))
+	else
+		printf '  [WARN] No SHA256 tool found (required for --dedupe)\n'
+		warn=$((warn + 1))
+	fi
+	if command -v exiftool >/dev/null 2>&1; then
+		printf '  [OK] exiftool (optional, for EXIF dates/music tags)\n'
+		ok=$((ok + 1))
+	else
+		printf '  [INFO] exiftool not found (optional)\n'
+	fi
+	printf '\nSummary: %d ok, %d warnings/info\n' "$ok" "$warn"
+	if [[ $warn -eq 0 ]]; then
+		printf 'All required dependencies look good!\n'
+	else
+		printf 'Some optional/missing deps detected - see above.\n'
+	fi
+}
+
 parse_size() {
 	local s=$1 n unit
 	[[ $s =~ ^([0-9]+)([kKmMgG]?)$ ]] || die "invalid size: $s (use bytes or K/M/G suffix)"
@@ -328,46 +368,7 @@ while (($# > 0)); do
 		exit 0
 		;;
 	--doctor)
-		(
-			printf 'organize.sh %s - dependency check\n\n' "$VERSION"
-			ok=0
-			warn=0
-			if command -v bash >/dev/null && bash --version | grep -q 'version [4-9]\|version 10'; then
-				printf '  [OK] bash %s\n' "$(bash --version | head -n1 | awk '{print $4}')"
-				ok=$((ok + 1))
-			else
-				printf '  [WARN] bash version may be too old (need >= 4)\n'
-				warn=$((warn + 1))
-			fi
-			for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum; do
-				if command -v "$cmd" >/dev/null 2>&1; then
-					printf '  [OK] %s\n' "$cmd"
-					ok=$((ok + 1))
-				else
-					printf '  [WARN] %s not found\n' "$cmd"
-					warn=$((warn + 1))
-				fi
-			done
-			if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v sha256 >/dev/null 2>&1; then
-				printf '  [OK] SHA256 available (for --dedupe)\n'
-				ok=$((ok + 1))
-			else
-				printf '  [WARN] No SHA256 tool found (required for --dedupe)\n'
-				warn=$((warn + 1))
-			fi
-			if command -v exiftool >/dev/null 2>&1; then
-				printf '  [OK] exiftool (optional, for EXIF dates/music tags)\n'
-				ok=$((ok + 1))
-			else
-				printf '  [INFO] exiftool not found (optional)\n'
-			fi
-			printf '\nSummary: %d ok, %d warnings/info\n' "$ok" "$warn"
-			if [[ $warn -eq 0 ]]; then
-				printf 'All required dependencies look good!\n'
-			else
-				printf 'Some optional/missing deps detected - see above.\n'
-			fi
-		)
+		doctor_deps
 		exit 0
 		;;
 	--schedule)
@@ -2268,91 +2269,4 @@ fi
 
 print_summary
 
-<<<<<<< HEAD
-=======
-if ((UNSCHEDULE)); then
-	if ! command -v crontab >/dev/null; then
-		die "crontab not found"
-	fi
-	if crontab -l 2>/dev/null | grep -q "organize.*#organize-cron"; then
-		crontab -l 2>/dev/null | grep -v "organize.*#organize-cron" | crontab -
-		echo "Removed scheduled job"
-	else
-		echo "No scheduled job found"
-	fi
-	exit 0
-fi
 
-if [[ -n $SCHEDULE ]]; then
-	if [[ $SCHEDULE == *"@"* ]]; then
-		SCHEDULE_TIME=${SCHEDULE%%@*}
-		SCHEDULE_DIR_ARG=${SCHEDULE##*@}
-	else
-		SCHEDULE_TIME=$SCHEDULE
-		SCHEDULE_DIR_ARG=${DIR:-.}
-	fi
-	if [[ ! $SCHEDULE_TIME =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
-		die "invalid time format, use HH:MM (e.g., 09:00)"
-	fi
-	SCHEDULE_HOUR=${BASH_REMATCH[1]}
-	SCHEDULE_MIN=${BASH_REMATCH[2]}
-	if ((SCHEDULE_HOUR < 0 || SCHEDULE_HOUR > 23 || SCHEDULE_MIN < 0 || SCHEDULE_MIN > 59)); then
-		die "invalid time"
-	fi
-	case "$SCHEDULE_DIR_ARG" in
-	"~") SCHEDULE_DIR_ARG=$HOME ;;
-	"~/"*) SCHEDULE_DIR_ARG=$HOME/${SCHEDULE_DIR_ARG#\~/} ;;
-	esac
-	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
-	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
-	ORG_BIN=$(command -v organize 2>/dev/null || echo "$SCRIPT_PATH")
-	if ! command -v crontab >/dev/null; then
-		die "crontab not found; install cron or use systemd timer"
-	fi
-	CRON_LINE="$SCHEDULE_MIN $SCHEDULE_HOUR * * * $(printf '%q' "$ORG_BIN") $(printf '%q' "$SCHEDULE_DIR_ARG") #organize-cron"
-	(crontab -l 2>/dev/null | grep -v "organize.*#organize-cron"; echo "$CRON_LINE") | crontab -
-	echo "Scheduled: $SCHEDULE_HOUR:$(printf '%02d' $SCHEDULE_MIN) daily for $SCHEDULE_DIR_ARG"
-	echo "To remove: $(printf '%q' "$ORG_BIN") --unschedule"
-	exit 0
-fi
-
->>>>>>> ac1d1ef (Add directory locking and safer cron scheduling; update docs)
-doctor_deps() {
-	printf 'organize.sh %s - dependency check\n\n' "$VERSION"
-	local ok=0 warn=0
-	if command -v bash >/dev/null && bash --version | grep -q 'version [4-9]\|version 10'; then
-		printf '  [OK] bash %s\n' "$(bash --version | head -n1 | awk '{print $4}')"
-		ok=$((ok + 1))
-	else
-		printf '  [WARN] bash version may be too old (need >= 4)\n'
-		warn=$((warn + 1))
-	fi
-	for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum; do
-		if command -v "$cmd" >/dev/null 2>&1; then
-			printf '  [OK] %s\n' "$cmd"
-			ok=$((ok + 1))
-		else
-			printf '  [WARN] %s not found\n' "$cmd"
-			warn=$((warn + 1))
-		fi
-	done
-	if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v sha256 >/dev/null 2>&1; then
-		printf '  [OK] SHA256 available (for --dedupe)\n'
-		ok=$((ok + 1))
-	else
-		printf '  [WARN] No SHA256 tool found (required for --dedupe)\n'
-		warn=$((warn + 1))
-	fi
-	if command -v exiftool >/dev/null 2>&1; then
-		printf '  [OK] exiftool (optional, for EXIF dates/music tags)\n'
-		ok=$((ok + 1))
-	else
-		printf '  [INFO] exiftool not found (optional)\n'
-	fi
-	printf '\nSummary: %d ok, %d warnings/info\n' "$ok" "$warn"
-	if [[ $warn -eq 0 ]]; then
-		printf 'All required dependencies look good!\n'
-	else
-		printf 'Some optional/missing deps detected - see above.\n'
-	fi
-}
