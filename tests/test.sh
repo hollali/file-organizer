@@ -48,11 +48,11 @@ expect_contains "$out" "Total"
 
 printf 'version output\n'
 out=$(run --version 2>&1) || fail "--version failed: $out"
-expect_contains "$out" "organize.sh 1.3.0"
+expect_contains "$out" "organize.sh 1.3.1"
 
 printf 'doctor output\n'
 out=$(run --doctor 2>&1) || fail "--doctor failed: $out"
-expect_contains "$out" "organize.sh 1.3.0 - dependency check"
+expect_contains "$out" "organize.sh 1.3.1 - dependency check"
 expect_contains "$out" "Summary:"
 expect_contains "$out" "[OK]"
 
@@ -389,6 +389,20 @@ expect_file stray.srt
 expect_file "Rome Trip/lonely.srt"
 expect_contains "$out" "left in place"
 expect_contains "$out" "no matching video for sidecar"
+
+printf 'smart mode handles bracketed movie names\n'
+mkdir -p "$ROOT/smartbrackets"
+workdir smartbrackets
+printf 'paren' >"Some Movie (2020) 1080p.mkv"
+printf 'bracket' >"The Matrix [1999] BluRay.mkv"
+out=$(run --smart --dry-run . 2>&1) || fail "smart dry run with bracketed names failed: $out"
+expect_contains "$out" "Movies/Some Movie (2020)/"
+expect_contains "$out" "Movies/The Matrix (1999)/"
+expect_contains "$out" "Summary (dry run):"
+out=$(run --smart . 2>&1) || fail "smart run with bracketed names failed: $out"
+expect_file "Movies/Some Movie (2020)/Some Movie (2020) 1080p.mkv"
+expect_file "Movies/The Matrix (1999)/The Matrix [1999] BluRay.mkv"
+expect_contains "$out" "Movies"
 
 printf 'schedule multiple times per day\n'
 mkdir -p "$ROOT/bin" "$ROOT/sched"

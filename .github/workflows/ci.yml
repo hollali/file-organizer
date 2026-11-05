@@ -26,7 +26,15 @@ jobs:
           bash -n tests/test.sh
 
       - name: ShellCheck
-        run: shellcheck --severity=error organize.sh tests/test.sh
+        run: shellcheck --severity=warning organize.sh tests/test.sh
+
+      - name: shfmt
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            mvdan/shfmt:v3 \
+            -d organize.sh tests/test.sh
 
   test:
     name: Test (Ubuntu)

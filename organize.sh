@@ -8,7 +8,7 @@
 # Usage: ./organize.sh [options] [directory]
 #
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 
 set -euo pipefail
 
@@ -58,10 +58,8 @@ MIN_SIZE=""
 MAX_SIZE=""
 OLDER_THAN=""
 SCHEDULE=""
-SCHEDULE_DIR=""
 SCHEDULE_HOUR=""
 SCHEDULE_MIN=""
-SCHEDULE_DAYS=""
 
 CATEGORIES=(Images Documents Videos Audio Archives "Disk Images" Code Fonts Executables Other Folders)
 
@@ -384,7 +382,6 @@ while (($# > 0)); do
 		(
 			printf 'organize.sh %s - installing missing dependencies\n\n' "$VERSION"
 			to_install=()
-			need_sudo=0
 			command -v bash >/dev/null || to_install+=(bash)
 			command -v find >/dev/null || to_install+=(findutils)
 			command -v stat >/dev/null || to_install+=(coreutils)
@@ -514,9 +511,10 @@ if [[ -n $SCHEDULE ]]; then
 		SCHEDULE_TIME=$SCHEDULE
 		SCHEDULE_DIR_ARG=$DIR
 	fi
+	# shellcheck disable=SC2088 # match a literal leading tilde
 	case "$SCHEDULE_DIR_ARG" in
 	"~") SCHEDULE_DIR_ARG=$HOME ;;
-	"~/"*) SCHEDULE_DIR_ARG=$HOME/${SCHEDULE_DIR_ARG#\~/} ;;
+	"~/"*) SCHEDULE_DIR_ARG=$HOME/${SCHEDULE_DIR_ARG:2} ;;
 	esac
 	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
 	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
@@ -931,7 +929,6 @@ season_from_folder() {
 	local name=$1
 	local re_season='^[Ss]eason[._ -]*([0-9]{1,2})$'
 	local re_series='^[Ss]eries[._ -]*([0-9]{1,2})$'
-	local re_short='^[Ss]([0-9]{1,2})$'
 	if [[ $name =~ $re_season ]]; then
 		printf '%s' "$((10#${BASH_REMATCH[1]}))"
 		return 0
@@ -1062,14 +1059,22 @@ detect_movie() {
 	name=${name//_/ }
 
 	while [[ $name == *'['*']'* ]]; do
-		local pre=${name%%\[*} rest=${name#*\[} inner=${rest%%\]*} post=${rest#*\]}
+		local pre rest inner post
+		pre=${name%%\[*}
+		rest=${name#*\[}
+		inner=${rest%%\]*}
+		post=${rest#*\]}
 		if [[ $inner =~ $re_year ]]; then
 			year=$inner
 		fi
 		name="$pre $post"
 	done
 	while [[ $name == *'('*')'* ]]; do
-		local pre=${name%%\(*} rest=${name#*\(} inner=${rest%%\)*} post=${rest#*\)}
+		local pre rest inner post
+		pre=${name%%\(*}
+		rest=${name#*\(}
+		inner=${rest%%\)*}
+		post=${rest#*\)}
 		if [[ $inner =~ $re_year ]]; then
 			year=$inner
 		fi
@@ -1124,7 +1129,7 @@ assoc_key() {
 		case $lw in
 		en | eng | english | ar | ara | arabic | fr | fre | fra | french | es | spa | spanish | \
 			de | ger | deu | german | it | ita | italian | pt | por | portuguese | ru | rus | russian | \
-			nl | dut | dutch | pl | pol | polish | tr | tur | turkish | hi | hin | hindi | \
+			nl | dut | dutch | pl | pol | polish | tr | tur | turkish | hin | hindi | \
 			ja | jpn | japanese | ko | kor | korean | zh | chi | chs | cht | chinese | \
 			forced | sdh | cc | hi)
 			name=${name%"${BASH_REMATCH[0]}"}
@@ -1239,7 +1244,7 @@ name_is_generic() {
 	[[ $lw =~ ^(19|20)[0-9]{2}$ ]] && return 0
 
 	case $lw in
-		image | images | photo | photos | photograph | photographs | picture | pictures | \
+	image | images | photo | photos | photograph | photographs | picture | pictures | \
 		pics | screenshot | screenshots | camera | wallpapers | wallpaper | memes | \
 		document | documents | doc | docs | my\ documents | files | file | \
 		download | downloads | desktop | music | audio | video | videos | \
@@ -1327,7 +1332,7 @@ prune_empty_source_dirs() {
 # show/season, movies by title/year, and other media by type, then moves
 # related sidecar files (subtitles, nfo, artwork) with their video.
 smart_organize() {
-		local src base ext rel key cat date_dir name d abs_dir label dest_dir ctx
+	local src base ext rel key cat date_dir name d abs_dir label dest_dir ctx akey
 	local -A assoc=()
 	local -A dir_dest=()
 	local -A dir_ambig=()
@@ -1360,7 +1365,8 @@ smart_organize() {
 		key=$(assoc_key "$base")
 		# Key sidecar associations by source directory so identical stems in
 		# different seasons can never cross-match.
-		[[ -n $key ]] && assoc[${d}/${key}]=$rel
+		akey="$d/$key"
+		[[ -n $key ]] && assoc["$akey"]=$rel
 		if [[ -z ${dir_dest[$d]:-} ]]; then
 			dir_dest[$d]=$rel
 		elif [[ ${dir_dest[$d]} != "$rel" ]]; then
@@ -1387,8 +1393,9 @@ smart_organize() {
 			[[ $rel == Movies/* ]] && label=Movies
 		else
 			key=$(assoc_key "$base")
-			if [[ -n $key && -n ${assoc[${d}/${key}]:-} ]]; then
-				rel=${assoc[${d}/${key}]}
+			akey="$d/$key"
+			if [[ -n $key && -n ${assoc["$akey"]:-} ]]; then
+				rel=${assoc["$akey"]}
 				label=Videos
 				[[ $rel == Movies/* ]] && label=Movies
 			elif is_sidecar_file "$src" && [[ -n ${dir_dest[$d]:-} ]]; then
@@ -1496,7 +1503,7 @@ move_one() {
 		else
 			printf 'would move: %s -> %s\n' "$src" "$dest"
 		fi
-		record_move "$cat" "$size"
+		record_move "${label:-$cat}" "$size"
 		return
 	fi
 
@@ -1816,9 +1823,11 @@ handle_duplicate() {
 }
 
 record_move() {
-	local cat=${1%%/*} size=$2
-	COUNT_BY_CAT["$cat"]=$((${COUNT_BY_CAT[$cat]:-0} + 1))
-	SIZE_BY_CAT["$cat"]=$((${SIZE_BY_CAT[$cat]:-0} + size))
+	local cat=${1%%/*} size=$2 count bytes
+	count=${COUNT_BY_CAT["$cat"]:-0}
+	COUNT_BY_CAT["$cat"]=$((count + 1))
+	bytes=${SIZE_BY_CAT["$cat"]:-0}
+	SIZE_BY_CAT["$cat"]=$((bytes + size))
 	MOVED_COUNT=$((MOVED_COUNT + 1))
 	MOVED_BYTES=$((MOVED_BYTES + size))
 }
@@ -1935,9 +1944,9 @@ menu_msg() {
 # captured output in a scrollable text box. Output is always shown, even when
 # the run fails, so errors are visible inside the menu.
 menu_run() {
-	local file status=0
+	local file
 	file=$(mktemp "${TMPDIR:-/tmp}/organize-menu-XXXXXX")
-	bash "$SCRIPT_PATH" "$@" >"$file" 2>&1 || status=$?
+	bash "$SCRIPT_PATH" "$@" >"$file" 2>&1 || true
 	ui_size
 	whiptail --title "organize.sh ${VERSION}" --textbox "$file" "$UIH" "$UIW" || true
 	rm -f -- "$file"
@@ -2095,7 +2104,7 @@ fi
 
 if [[ $MENU -eq 1 ]]; then
 	[[ -t 0 ]] || die "--menu requires an interactive terminal (tty)"
-	command -v whiptail >/dev/null 2>&1 || \
+	command -v whiptail >/dev/null 2>&1 ||
 		die "whiptail is required for --menu (install it with your package manager)"
 	acquire_lock
 	menu_main "$DIR"
@@ -2268,5 +2277,3 @@ if [[ -n $LOG ]]; then
 fi
 
 print_summary
-
-

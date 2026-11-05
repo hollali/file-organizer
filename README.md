@@ -61,8 +61,8 @@ It does not use distro-specific paths, package managers, or init systems.
 Clone the repo and run it directly:
 
 ```sh
-git clone https://github.com/hollali/scripts.git
-cd scripts
+git clone https://github.com/hollali/file-organizer.git
+cd file-organizer
 chmod +x organize.sh
 ```
 
@@ -120,8 +120,8 @@ changed until step 5.
 1. **Get the script and make it executable.**
 
    ```sh
-   git clone https://github.com/hollali/scripts.git
-   cd scripts
+   git clone https://github.com/hollali/file-organizer.git
+   cd file-organizer
    chmod +x organize.sh
    ```
 
@@ -760,18 +760,28 @@ bash tests/test.sh
 
 Continuous integration (`.github/workflows/ci.yml`) runs:
 
-- Bash syntax checks and ShellCheck
+- Bash syntax checks
+- ShellCheck at warning severity
+- `shfmt` formatting checks
 - The full test suite on Ubuntu
 - The full test suite on Alpine with only Bash installed, exercising BusyBox
   `find`, `stat`, `mv`, and related tools
 
-Releases (`.github/workflows/release.yml`) run when a tag matching `v*` is
-pushed. They build a `.tar.gz` containing `organize.sh` and `README.md`, create
-a `.sha256` checksum, and publish both as GitHub release assets:
+You can run the same static checks locally with:
 
 ```sh
-git tag v1.1.0
-git push origin v1.1.0
+shellcheck --severity=warning organize.sh tests/test.sh
+shfmt -d organize.sh tests/test.sh
+```
+
+Releases (`.github/workflows/release.yml`) run when a tag matching `v*` is
+pushed. They build a `.tar.gz` containing `organize.sh`, `README.md`, `LICENSE`,
+and the install/uninstall helpers, create a `.sha256` checksum, and publish
+both as GitHub release assets:
+
+```sh
+git tag v1.3.1
+git push origin v1.3.1
 ```
 
 There is no server component; "deployment" for this project means publishing a
