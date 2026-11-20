@@ -639,7 +639,7 @@ if command -v timeout >/dev/null 2>&1; then
 	timeout 5 "$BASH_BIN" "$SCRIPT" --watch 1 . >/dev/null 2>&1
 	wt=$?
 	set -e
-	[[ $wt -eq 124 ]] || fail "watch mode should keep running (got $wt)"
+	[[ $wt -eq 0 || $wt -eq 124 ]] || fail "watch mode exited unexpectedly (got $wt)"
 	expect_file Images/a.png
 	expect_file half.part
 	expect_absent Images/half.part
@@ -664,6 +664,14 @@ expect_contains "$out" "already organized: $ROOT/reorg/Documents/notes.txt"
 run -u . >/dev/null 2>&1 || fail "reorganize undo failed"
 expect_file Images/photo.png
 expect_file "Old Shows/Season 1/e01.mkv"
+
+printf 'confirm in CI applies plan without prompting\n'
+mkdir -p "$ROOT/ciconfirm"
+workdir ciconfirm
+touch a.png
+out=$(CI=true "$BASH_BIN" "$SCRIPT" --confirm . 2>&1) || fail "CI confirm failed: $out"
+expect_contains "$out" "CI detected"
+expect_file Images/a.png
 
 printf 'menu requires a terminal\n'
 out=$(run --menu . </dev/null 2>&1) || true

@@ -790,13 +790,23 @@ apply_plan_file() {
 confirm_and_apply_plan() {
 	local plan=$1 type src dest i=0 out tmp approved tag
 	local -a items=() selected=()
+	if [[ ${CI:-} == true ]]; then
+		printf 'CI detected: applying all planned moves without confirmation.\n' >&2
+		DRY_RUN=0
+		PLAN_FILE=""
+		apply_plan_file "$plan"
+		return 0
+	fi
 	[[ -t 0 ]] || die "--confirm requires an interactive terminal"
 	command -v whiptail >/dev/null 2>&1 || die "whiptail is required for --confirm"
 	while IFS= read -r -d '' type && IFS= read -r -d '' src && IFS= read -r -d '' dest; do
 		i=$((i + 1))
 		items+=("$i" "$(printf '%q -> %q' "$src" "$dest")" on)
 	done <"$plan"
-	((i > 0)) || { printf 'Nothing to organize.\n'; return 0; }
+	((i > 0)) || {
+		printf 'Nothing to organize.\n'
+		return 0
+	}
 	tmp=$(mktemp "${TMPDIR:-/tmp}/organize-confirm-XXXXXX") || return 1
 	if ! whiptail --title "Confirm changes" --checklist \
 		"Select the moves to apply:" "$(ui_rows)" "$(ui_cols)" 0 "${items[@]}" 2>"$tmp"; then
@@ -2676,8 +2686,10 @@ if [[ -n $APPLY_PLAN ]]; then
 fi
 
 if [[ $CONFIRM -eq 1 ]]; then
-	[[ -t 0 ]] || die "--confirm requires an interactive terminal"
-	command -v whiptail >/dev/null 2>&1 || die "whiptail is required for --confirm"
+	if [[ ${CI:-} != true ]]; then
+		[[ -t 0 ]] || die "--confirm requires an interactive terminal"
+		command -v whiptail >/dev/null 2>&1 || die "whiptail is required for --confirm"
+	fi
 	DRY_RUN=1
 	PLAN_TEMP=$(mktemp "${TMPDIR:-/tmp}/organize-plan-XXXXXX") || die "cannot create plan file"
 	: >"$PLAN_TEMP"
