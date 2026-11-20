@@ -293,7 +293,8 @@ changed until step 5.
 | `--apply-plan FILE` | Apply a reviewed plan file |
 | `--confirm` | Review and select individual moves (whiptail) |
 | `--watch [SEC]` | Organize repeatedly every SEC seconds (default 5) |
-| `-u, --undo` | Undo the most recent run in the given directory |
+| `-u, --undo [N]` | Undo the Nth most recent run (default: 1) in the given directory |
+| `--undo-list` | List undo history for the given directory |
 | `--by-date` | Group files as `Category/YYYY/MM/` |
 | `--dedupe` | Skip files identical to ones already organized |
 | `--duplicates MODE` | Duplicate handling: `skip` (default), `delete`, `move`, or `trash` |
@@ -675,6 +676,29 @@ mode. Destinations may be nested, but must be relative and must not contain
 The active rules file is never moved, even when it lives inside the directory
 being organized.
 
+Add conditions after the pattern to make a rule apply only to some files.
+Conditions may be combined (separated by spaces or commas) and use `size` or
+`age` in days:
+
+```
+*.jpg [size>1M]          -> Pictures/Large
+*.png [age<30]           -> Screenshots/Recent
+*.log [size>100M age>7]  -> Archives/Old Logs
+```
+
+Destinations may contain placeholders that are filled in per file:
+
+| Placeholder | Value |
+| --- | --- |
+| `{year}` | Modification year (`YYYY`) |
+| `{month}` | Modification month (`MM`) |
+| `{ext}` | Lowercase extension without the dot |
+
+```
+*.png  -> Pictures/{year}/{month}
+*.txt  -> Text/{ext}
+```
+
 The same file can define custom top-level categories with `@category` lines,
 mapping a category name to a list of extensions:
 
@@ -755,6 +779,17 @@ ignored. Only options are allowed in the config file:
 --dedupe
 --duplicates trash
 --exclude *.tmp
+```
+
+A directory can also carry a `.organize.conf` file next to its files. Its
+options override the global config, while explicit command-line flags still win
+over both. The file itself is never moved:
+
+```
+# /home/user/Downloads/.organize.conf
+--rename
+--by-date
+--exclude *.crdownload
 ```
 
 ## Examples

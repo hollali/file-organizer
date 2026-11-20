@@ -49,8 +49,11 @@ Apply a previously reviewed plan file.
 .B \-\-confirm
 Preview the plan, then select moves interactively (requires whiptail).
 .TP
-.BR \-u,\ \-\-undo
-Undo the most recent run in DIRECTORY.
+.BR \-u,\ \-\-undo " [N]"
+Undo the Nth most recent run in DIRECTORY (default: 1).
+.TP
+.B \-\-undo-list
+List the undo history for DIRECTORY.
 .TP
 .B \-\-by-date
 Add YYYY/MM subfolders.
@@ -113,8 +116,20 @@ Print the version and exit.
 .I ~/.config/organize/config.conf
 Default command-line options.
 .TP
+.I DIRECTORY/.organize.conf
+Per-directory options; overrides the global config.
+.TP
 .I ~/.config/organize/rules.conf
-Custom rules, categories and aliases.
+Custom rules, categories and aliases. Rules accept optional
+.RI [ size OP N ]
+and
+.RI [ age OP N ]
+conditions and
+.BR {year} ,
+.B {month}
+and
+.B {ext}
+placeholders in destinations.
 .TP
 .I DIRECTORY/.organize-log-*.log
 Undo logs (NUL-delimited).

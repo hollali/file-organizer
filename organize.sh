@@ -55,6 +55,8 @@ RECURSIVE=0
 MOVE_FOLDERS=0
 INCLUDE_HIDDEN=0
 UNDO=0
+UNDO_INDEX=1
+LIST_LOGS=0
 TV_MODE=0
 MUSIC_MODE=0
 SMART_MODE=0
@@ -80,6 +82,7 @@ CATEGORIES=(Images Documents Videos Audio Archives "Disk Images" Code Fonts Exec
 
 RULE_PATTERNS=()
 RULE_DESTS=()
+RULE_CONDS=()
 CAT_EXT_NAMES=()
 CAT_EXT_LISTS=()
 INCLUDE_PATTERNS=()
@@ -92,6 +95,7 @@ declare -A SEEN_HASH=()
 declare -A COUNT_BY_CAT=()
 declare -A SIZE_BY_CAT=()
 declare -A SMART_DEST=()
+UNDO_LOGS=()
 
 SMART_SHOW=""
 SMART_SEASON=""
@@ -150,7 +154,8 @@ Options:
       --plan FILE    Write the planned actions to FILE during a dry run
       --apply-plan FILE  Execute a reviewed plan file
       --confirm      Preview, then confirm or reject individual moves (whiptail)
-  -u, --undo         Undo the most recent run in the given directory
+  -u, --undo [N]     Undo the Nth most recent run (default: 1) in the given directory
+      --undo-list    List undo history for the given directory
       --by-date      Group files as Category/YYYY/MM/
       --dedupe       Skip files identical to ones already organized
       --duplicates M Handle duplicates: skip (default), delete, move, or trash
@@ -319,18 +324,69 @@ percent_encode() {
 }
 
 load_default_config() {
-	local file=$1 line
+	local file=$1 which=${2:-main} line
 	local -a words=()
 	[[ -f $file ]] || return 0
 	while IFS= read -r line || [[ -n $line ]]; do
 		line=${line%%#*}
 		read -r -a words <<<"$line"
 		((${#words[@]} > 0)) || continue
-		CONFIG_ARGS+=("${words[@]}")
+		if [[ $which == dir ]]; then
+			DIR_CONFIG_ARGS+=("${words[@]}")
+		else
+			CONFIG_ARGS+=("${words[@]}")
+		fi
 	done <"$file"
 }
 
+validate_config_args() {
+	local w expect=0
+	for w in "$@"; do
+		if ((expect)); then
+			expect=0
+			continue
+		fi
+		case $w in
+		--target | -t | --duplicates | --rules | --config | --include | -i | --exclude | -x | --min-size | --max-size | --older-than | --plan | --apply-plan)
+			expect=1
+			;;
+		-*) ;;
+		*) die "config: only options are allowed: $w" ;;
+		esac
+	done
+}
+
+prescan_dir_arg() {
+	local -a args=("$@")
+	local i=0 arg
+	while ((i < ${#args[@]})); do
+		arg=${args[i]}
+		case $arg in
+		--target | -t | --duplicates | --rules | --config | --include | -i | --exclude | -x | --min-size | --max-size | --older-than | --plan | --apply-plan | --install-timer | --schedule)
+			i=$((i + 2))
+			;;
+		--watch | --undo)
+			if ((i + 1 < ${#args[@]})) && [[ ${args[i + 1]} =~ ^[0-9]+$ ]]; then
+				i=$((i + 2))
+			else
+				i=$((i + 1))
+			fi
+			;;
+		-*)
+			i=$((i + 1))
+			;;
+		*)
+			printf '%s' "$arg"
+			return 0
+			;;
+		esac
+	done
+	return 1
+}
+
 CONFIG_CLI=""
+DIR_CONFIG_ARGS=()
+DIR_PRESCAN=$(prescan_dir_arg "$@") || DIR_PRESCAN=.
 prev_arg=""
 for arg in "$@"; do
 	[[ $prev_arg == --config ]] && CONFIG_CLI=$arg
@@ -348,28 +404,23 @@ fi
 if [[ -n $config_path ]]; then
 	if [[ -f $config_path ]]; then
 		load_default_config "$config_path"
-		expect_value=0
-		for w in "${CONFIG_ARGS[@]}"; do
-			if ((expect_value)); then
-				expect_value=0
-				continue
-			fi
-			case $w in
-			--target | -t | --duplicates | --rules | --config | --include | -i | --exclude | -x | --min-size | --max-size | --older-than)
-				expect_value=1
-				;;
-			-*)
-				;;
-			*)
-				die "config: only options are allowed: $w"
-				;;
-			esac
-		done
-		if ((${#CONFIG_ARGS[@]} > 0)); then
-			set -- "${CONFIG_ARGS[@]}" "$@"
-		fi
+		((${#CONFIG_ARGS[@]} == 0)) || validate_config_args "${CONFIG_ARGS[@]}"
 	elif [[ -n $CONFIG_CLI ]]; then
 		die "config file not found: $CONFIG_CLI"
+	fi
+
+	# Per-directory defaults live next to the files and override the global
+	# config, while explicit command-line flags still win over both.
+	if [[ -f $DIR_PRESCAN/.organize.conf ]]; then
+		load_default_config "$DIR_PRESCAN/.organize.conf" dir
+		((${#DIR_CONFIG_ARGS[@]} == 0)) || validate_config_args "${DIR_CONFIG_ARGS[@]}"
+	fi
+
+	local_config_args=()
+	((${#CONFIG_ARGS[@]} == 0)) || local_config_args+=("${CONFIG_ARGS[@]}")
+	((${#DIR_CONFIG_ARGS[@]} == 0)) || local_config_args+=("${DIR_CONFIG_ARGS[@]}")
+	if ((${#local_config_args[@]} > 0)); then
+		set -- "${local_config_args[@]}" "$@"
 	fi
 fi
 
@@ -461,6 +512,15 @@ while (($# > 0)); do
 		;;
 	-u | --undo)
 		UNDO=1
+		if (($# >= 2)) && [[ $2 =~ ^[0-9]+$ ]]; then
+			UNDO_INDEX=$2
+			shift 2
+		else
+			shift
+		fi
+		;;
+	--undo-list | --list-logs)
+		LIST_LOGS=1
 		shift
 		;;
 	-i | --include)
@@ -986,30 +1046,82 @@ restore_entries() {
 	done
 }
 
-undo_last() {
+undo_logs_newest_first() {
 	local log latest
-	local -a logs=()
+	local -a logs=() remaining=() next=()
+	UNDO_LOGS=()
 
 	shopt -s nullglob
 	logs=("$DIR"/.organize-log-*.log)
 	shopt -u nullglob
+	((${#logs[@]} > 0)) || return 1
 
-	((${#logs[@]} > 0)) || die "no organize log found in $DIR"
-
-	latest=${logs[0]}
-	for log in "${logs[@]}"; do
-		[[ $log -nt $latest ]] && latest=$log
+	remaining=("${logs[@]}")
+	while ((${#remaining[@]} > 0)); do
+		latest=${remaining[0]}
+		for log in "${remaining[@]}"; do
+			[[ $log -nt $latest ]] && latest=$log
+		done
+		UNDO_LOGS+=("$latest")
+		next=()
+		for log in "${remaining[@]}"; do
+			[[ $log == "$latest" ]] || next+=("$log")
+		done
+		remaining=()
+		((${#next[@]} > 0)) && remaining=("${next[@]}")
 	done
+	return 0
+}
 
-	read_log_entries "$latest"
+log_stamp_label() {
+	local base=$1 stamp date_part time_part
+	base=${base##*/}
+	stamp=${base#.organize-log-}
+	stamp=${stamp%-*}
+	date_part=${stamp%%-*}
+	time_part=${stamp#*-}
+	if [[ $date_part =~ ^[0-9]{8}$ && $time_part =~ ^[0-9]{6}$ ]]; then
+		printf '%s-%s-%s %s:%s:%s' \
+			"${date_part:0:4}" "${date_part:4:2}" "${date_part:6:2}" \
+			"${time_part:0:2}" "${time_part:2:2}" "${time_part:4:2}"
+	else
+		printf '%s' "$base"
+	fi
+}
+
+list_undo_logs() {
+	local log i=0
+	undo_logs_newest_first || {
+		printf 'No organize logs in %s.\n' "$DIR"
+		return 0
+	}
+	for log in "${UNDO_LOGS[@]}"; do
+		i=$((i + 1))
+		read_log_entries "$log"
+		printf '%d  %s  %d move(s)  %s\n' \
+			"$i" "$(log_stamp_label "$log")" "${#READ_LOG_SRCS[@]}" "$READ_LOG_TARGET"
+	done
+}
+
+undo_run() {
+	local index=$1 log
+	[[ $index =~ ^[0-9]+$ ]] || die "invalid undo index: $index"
+	((index >= 1)) || die "undo index must be 1 or greater"
+
+	undo_logs_newest_first || die "no organize log found in $DIR"
+	((${#UNDO_LOGS[@]} >= index)) ||
+		die "only ${#UNDO_LOGS[@]} organize log(s) in $DIR"
+	log=${UNDO_LOGS[index - 1]}
+
+	read_log_entries "$log"
 	if ((${#READ_LOG_SRCS[@]} == 0)); then
-		rm -f -- "$latest"
+		rm -f -- "$log"
 		printf 'Nothing to undo.\n'
 		return
 	fi
 
 	restore_entries "$READ_LOG_TARGET"
-	rm -f -- "$latest"
+	rm -f -- "$log"
 	printf 'Undo complete.\n'
 }
 
@@ -1859,7 +1971,7 @@ smart_organize() {
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
 		[[ $(category_for "$ext") == Videos ]] || continue
 		# Explicit rules and custom categories always win over smart detection.
-		if rule_for "$base" >/dev/null; then
+		if rule_for "$src" >/dev/null; then
 			continue
 		fi
 		if custom_category_for "$ext" >/dev/null; then
@@ -1898,7 +2010,7 @@ smart_organize() {
 		abs_dir=""
 		label=""
 		MOVE_REASON=""
-		if cat=$(rule_for "$base"); then
+		if cat=$(rule_for "$src"); then
 			rel=$cat
 			label=${cat%%/*}
 			MOVE_REASON="custom rule"
@@ -2074,7 +2186,7 @@ add_managed_dir() {
 }
 
 load_rules() {
-	local file=$1 line pattern dest lineno=0
+	local file=$1 line pattern dest cond tok lineno=0
 	local cat_name cat_exts
 	local -a ext_arr=()
 	[[ -f $file ]] || die "rules file not found: $file"
@@ -2151,10 +2263,26 @@ load_rules() {
 			die "rules: $file:$lineno: expected 'PATTERN -> FOLDER'"
 		fi
 
+		cond=""
+		if [[ $pattern =~ ^(.*[^[:space:]])[[:space:]]+\[([^]]+)\][[:space:]]*$ ]]; then
+			pattern=${BASH_REMATCH[1]}
+			cond=${BASH_REMATCH[2]}
+		fi
 		pattern=$(trim "$pattern")
 		dest=$(trim "$dest")
+		cond=$(trim "$cond")
 		[[ -n $pattern ]] || die "rules: $file:$lineno: empty pattern"
 		[[ -n $dest ]] || die "rules: $file:$lineno: empty folder"
+		if [[ -n $cond ]]; then
+			for tok in ${cond//,/ }; do
+				if [[ ! $tok =~ ^(size|age)(>=|<=|>|<)([0-9]+[kKmMgG]?)$ ]]; then
+					die "rules: $file:$lineno: invalid condition '$tok' (use size/age with >, >=, <, <=)"
+				fi
+				if [[ ${BASH_REMATCH[1]} == age && ${BASH_REMATCH[3]} == *[kKmMgG]* ]]; then
+					die "rules: $file:$lineno: age must be a whole number of days"
+				fi
+			done
+		fi
 		[[ $dest == /* ]] && die "rules: $file:$lineno: folder must be relative"
 		case "/$dest/" in
 		*/../*)
@@ -2170,19 +2298,112 @@ load_rules() {
 
 		RULE_PATTERNS+=("$pattern")
 		RULE_DESTS+=("$dest")
-		add_managed_dir "${dest%%/*}"
+		RULE_CONDS+=("$cond")
+		if [[ ${dest%%/*} != *'{'* ]]; then
+			add_managed_dir "${dest%%/*}"
+		fi
 	done <"$file"
 }
 
+file_year_month() {
+	local src=$1 stamp
+	stamp=$(stat -c %y "$src" 2>/dev/null || true)
+	if [[ $stamp =~ ^([0-9]{4})-([0-9]{2}) ]]; then
+		printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+		return 0
+	fi
+	stamp=$(date -r "$src" '+%Y %m' 2>/dev/null || true)
+	[[ -n $stamp ]] && {
+		printf '%s\n' "$stamp"
+		return 0
+	}
+	return 1
+}
+
+compare_number() {
+	local op=$1 a=$2 b=$3
+	case $op in
+	'>') ((a > b)) ;;
+	'>=') ((a >= b)) ;;
+	'<') ((a < b)) ;;
+	'<=') ((a <= b)) ;;
+	*) return 1 ;;
+	esac
+}
+
+rule_conditions_met() {
+	local conds=$1 src=$2 field op val size="" mtime="" now age tok
+	local -a toks=()
+	conds=${conds//,/ }
+	# shellcheck disable=SC2206 # word splitting is intentional
+	toks=($conds)
+	((${#toks[@]} > 0)) || return 0
+
+	for tok in "${toks[@]}"; do
+		if [[ $tok =~ ^(size|age)(>=|<=|>|<)(.+)$ ]]; then
+			field=${BASH_REMATCH[1]}
+			op=${BASH_REMATCH[2]}
+			val=${BASH_REMATCH[3]}
+		else
+			return 1
+		fi
+		if [[ $field == size ]]; then
+			[[ -n $size ]] || size=$(file_size "$src" 2>/dev/null || printf '0')
+			[[ $size =~ ^[0-9]+$ ]] || return 1
+			val=$(parse_size "$val") || return 1
+			compare_number "$op" "$size" "$val" || return 1
+		else
+			if [[ -z $mtime ]]; then
+				mtime=$(stat -c %Y "$src" 2>/dev/null || date -r "$src" +%s 2>/dev/null || true)
+			fi
+			[[ $mtime =~ ^[0-9]+$ ]] || return 1
+			[[ $val =~ ^[0-9]+$ ]] || return 1
+			now=$(date +%s)
+			age=$(((now - mtime) / 86400))
+			compare_number "$op" "$age" "$val" || return 1
+		fi
+	done
+	return 0
+}
+
+expand_rule_dest() {
+	local dest=$1 src=$2 ext=$3 ym="" y="" m=""
+	if [[ $dest == *'{year}'* || $dest == *'{month}'* ]]; then
+		ym=$(file_year_month "$src" 2>/dev/null || true)
+		if [[ -n $ym ]]; then
+			y=${ym%% *}
+			m=${ym##* }
+		fi
+	fi
+	dest=${dest//\{year\}/$y}
+	dest=${dest//\{month\}/$m}
+	dest=${dest//\{ext\}/$ext}
+	while [[ $dest == *//* ]]; do
+		dest=${dest//\/\//\/}
+	done
+	while [[ $dest == */ ]]; do
+		dest=${dest%/}
+	done
+	dest=${dest#./}
+	printf '%s\n' "$dest"
+}
+
 rule_for() {
-	local base=$1 i
+	local src=$1 base ext i
+	base=$(basename -- "$src")
+	ext=""
+	[[ $base != .* && $base == *.* ]] && ext=${base##*.}
+	ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
 	((${#RULE_PATTERNS[@]} > 0)) || return 1
 
 	shopt -s nocasematch
 	for ((i = 0; i < ${#RULE_PATTERNS[@]}; i++)); do
 		# shellcheck disable=SC2053 # the right-hand side is intentionally a glob
 		if [[ $base == ${RULE_PATTERNS[i]} ]]; then
-			printf '%s\n' "${RULE_DESTS[i]}"
+			if [[ -n ${RULE_CONDS[i]} ]] && ! rule_conditions_met "${RULE_CONDS[i]}" "$src"; then
+				continue
+			fi
+			expand_rule_dest "${RULE_DESTS[i]}" "$src" "$ext"
 			shopt -u nocasematch
 			return 0
 		fi
@@ -2698,9 +2919,15 @@ elif [[ -n $PLAN_FILE ]]; then
 	: >"$PLAN_FILE" || die "cannot write plan file: $PLAN_FILE"
 fi
 
+if [[ $LIST_LOGS -eq 1 ]]; then
+	acquire_lock
+	list_undo_logs
+	exit 0
+fi
+
 if [[ $UNDO -eq 1 ]]; then
 	acquire_lock
-	undo_last
+	undo_run "$UNDO_INDEX"
 	exit 0
 fi
 
@@ -2748,6 +2975,7 @@ should_skip() {
 	[[ $src -ef $SCRIPT_PATH ]] && return 0
 	[[ -n $RULES_PATH && $src -ef $RULES_PATH ]] && return 0
 	[[ $name == .organize-log-*.log ]] && return 0
+	[[ $name == .organize.conf ]] && return 0
 	[[ $src == "$TARGET"/.organize-deleted/* ]] && return 0
 	[[ $INCLUDE_HIDDEN -eq 0 ]] && is_hidden_name "$name" && return 0
 	if ((${#EXCLUDE_PATTERNS[@]} > 0)) && match_any_glob "$name" "${EXCLUDE_PATTERNS[@]}"; then
@@ -2832,7 +3060,7 @@ elif ((${#files[@]} > 0)); then
 
 		structured=0
 		MOVE_REASON=""
-		if cat=$(rule_for "$base"); then
+		if cat=$(rule_for "$src"); then
 			MOVE_REASON="custom rule"
 		elif cat=$(custom_category_for "$ext"); then
 			MOVE_REASON="custom category $cat"

@@ -156,6 +156,28 @@ expect_file old.png
 expect_file new.jpg
 expect_absent Images
 
+printf 'undo history selects older runs\n'
+mkdir -p "$ROOT/undohist"
+workdir undohist
+touch first.png second.png
+run . >/dev/null 2>&1 || fail "first undo-history run failed"
+sleep 1
+touch third.png
+run . >/dev/null 2>&1 || fail "second undo-history run failed"
+out=$(run --undo-list . 2>&1) || fail "undo list failed: $out"
+expect_contains "$out" "2 move(s)"
+expect_contains "$out" "1 move(s)"
+out=$(run --undo 2 . 2>&1) || fail "undo 2 failed: $out"
+expect_file first.png
+expect_file second.png
+expect_absent third.png
+expect_file Images/third.png
+out=$(run --undo 1 . 2>&1) || fail "undo 1 failed: $out"
+expect_file third.png
+expect_absent Images
+out=$(run --undo 3 . 2>&1) && fail "undo 3 should have failed"
+expect_contains "$out" "no organize log found"
+
 printf 'custom rules\n'
 mkdir -p "$ROOT/rules"
 workdir rules
@@ -167,6 +189,31 @@ expect_file Receipts/receipt-1.txt
 expect_file rules.conf
 out=$(run --rules rules.conf -r . 2>&1) || fail "second rules run failed: $out"
 expect_contains "$out" "Nothing to organize."
+
+printf 'rule conditions and placeholders\n'
+mkdir -p "$ROOT/rulecond"
+workdir rulecond
+printf '*.jpg [size>1M] -> Pictures/Large\n*.png [age<30] -> Pictures/Recent/{year}/{month}\n*.txt -> Text/{ext}\n' >rules.conf
+head -c 2097152 /dev/zero >big.jpg
+printf 'x' >small.jpg
+touch -t 202001010000 old.png
+touch new.png
+printf 'note' >note.txt
+run --rules rules.conf . >/dev/null 2>&1 || fail "rule conditions run failed"
+expect_file Pictures/Large/big.jpg
+expect_file Images/small.jpg
+expect_file Images/old.png
+expect_file "Pictures/Recent/$(date +%Y/%m)/new.png"
+expect_file Text/txt/note.txt
+
+printf 'invalid rule condition is rejected\n'
+mkdir -p "$ROOT/badrule"
+workdir badrule
+printf '*.jpg [size>lots] -> Pictures\n' >rules.conf
+touch a.jpg
+out=$(run --rules rules.conf . 2>&1) && fail "invalid rule condition should fail"
+expect_contains "$out" "invalid condition"
+expect_file a.jpg
 
 printf 'duplicate detection\n'
 mkdir -p "$ROOT/dedupe/Documents"
@@ -352,6 +399,26 @@ touch a.png b.pdf
 run . >/dev/null 2>&1 || fail "config run failed"
 expect_file a.png
 expect_file Documents/b.pdf
+rm -rf "$XDG_CONFIG_HOME/organize"
+
+printf 'per-directory config\n'
+mkdir -p "$ROOT/dirconf"
+workdir dirconf
+printf -- '--rename\n' >.organize.conf
+touch "My File.png"
+out=$(run . 2>&1) || fail "per-directory config run failed: $out"
+expect_file Images/my_file.png
+expect_file .organize.conf
+
+printf 'per-directory config overrides global config\n'
+mkdir -p "$XDG_CONFIG_HOME/organize"
+printf -- '--min-size 1M\n' >"$XDG_CONFIG_HOME/organize/config.conf"
+mkdir -p "$ROOT/dirconf2"
+workdir dirconf2
+printf -- '--min-size 0\n' >.organize.conf
+printf 'tiny' >tiny.txt
+run . >/dev/null 2>&1 || fail "per-directory override run failed"
+expect_file Documents/tiny.txt
 rm -rf "$XDG_CONFIG_HOME/organize"
 
 printf 'smart media mode\n'
