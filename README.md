@@ -95,11 +95,17 @@ Or manually:
 install -Dm755 organize.sh ~/.local/bin/organize
 ```
 
-To uninstall:
+`make install` also installs the man page and bash, zsh and fish completions
+(`PREFIX` defaults to `~/.local`; use `sudo make install PREFIX=/usr` for a
+system-wide install). To uninstall:
 
 ```sh
-./uninstall.sh
+make uninstall
 ```
+
+Distribution packaging helpers live in `packaging/`: `build-deb.sh` (run it as
+`make deb`), a `PKGBUILD` for Arch/AUR, and an `organize.rb` Homebrew formula.
+Set `sha256` in the formula and `pkgver` in the `PKGBUILD` when releasing.
 
 You can check dependencies with:
 

@@ -25,9 +25,11 @@ jobs:
           bash -n organize.sh
           bash -n tests/test.sh
           bash -n tests/fuzz.sh
+          bash -n completions/organize.bash
+          bash -n packaging/build-deb.sh
 
       - name: ShellCheck
-        run: shellcheck --severity=warning organize.sh tests/test.sh tests/fuzz.sh
+        run: shellcheck --severity=warning organize.sh tests/test.sh tests/fuzz.sh completions/organize.bash packaging/build-deb.sh
 
       - name: shfmt
         run: |
@@ -35,7 +37,7 @@ jobs:
             -v "$PWD:/src" \
             -w /src \
             mvdan/shfmt:v3 \
-            -d organize.sh tests/test.sh
+            -d organize.sh tests/test.sh completions/organize.bash packaging/build-deb.sh
 
   test:
     name: Test (Ubuntu)

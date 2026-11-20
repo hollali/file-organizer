@@ -1,0 +1,49 @@
+#compdef organize organize.sh
+
+_organize() {
+	_arguments -s \
+		'(-t --target)'{-t,--target}'[move files into DIR]:directory:_files -/' \
+		'(-r --recursive)'{-r,--recursive}'[include files from subdirectories]' \
+		'(-R --reorganize)'{-R,--reorganize}'[rescan files already inside category folders]' \
+		'--use-xdg-dirs[allow smart mode to use XDG user dirs]' \
+		'(-F --folders)'{-F,--folders}'[move top-level folders into Folders/]' \
+		'(-T --tv)'{-T,--tv}'[group episodes as Videos/Show/Season NN/]' \
+		'(-M --music)'{-M,--music}'[group tracks as Audio/Artist/Album/]' \
+		'(--smart --media)'{--smart,--media}'[smart media mode]' \
+		'(--menu --gui --interactive)'{--menu,--gui,--interactive}'[interactive menu]' \
+		'(-H --hidden)'{-H,--hidden}'[include hidden files]' \
+		'(-n --dry-run)'{-n,--dry-run}'[preview without changing anything]' \
+		'--explain[print a reason for every move]' \
+		'--plan[write planned actions to FILE]:file:_files' \
+		'--apply-plan[apply a reviewed plan file]:file:_files' \
+		'--confirm[select individual moves interactively]' \
+		'--watch[organize repeatedly]:seconds:(1 5 10 30 60)' \
+		'--install-timer[install systemd user timers]:times:' \
+		'--uninstall-timer[remove systemd timers]' \
+		'(-u --undo)'{-u,--undo}'[undo the Nth most recent run]:index:(1 2 3 4 5)' \
+		'--undo-list[list undo history]' \
+		'--list-logs[list undo history]' \
+		'(-i --include)'{-i,--include}'[only organize matching files]:glob:' \
+		'(-x --exclude)'{-x,--exclude}'[skip matching files]:glob:' \
+		'--min-size[skip files smaller than SIZE]:size:(1M 10M 100M 1G)' \
+		'--max-size[skip files larger than SIZE]:size:(1M 10M 100M 1G)' \
+		'--older-than[only organize files older than DAYS]:days:(1 7 30 60)' \
+		'--rename[normalize names while moving]' \
+		'(-l --link)'{-l,--link}'[leave a symlink at the original path]' \
+		'--json[print the summary as JSON]' \
+		'--version[show the version and exit]' \
+		'--doctor[check dependencies]' \
+		'--schedule[install daily cron jobs]:times:' \
+		'--unschedule[remove cron jobs]' \
+		'--install-deps[install missing dependencies]' \
+		'--trash[move duplicates to the trash]' \
+		'--by-date[group files as Category/YYYY/MM/]' \
+		'--dedupe[skip files identical to organized ones]' \
+		'--duplicates[duplicate handling]:mode:(skip delete move trash)' \
+		'--rules[load custom rules]:file:_files' \
+		'--config[load default flags]:file:_files' \
+		'(-h --help)'{-h,--help}'[show help]' \
+		'*:directory:_files -/'
+}
+
+_organize "$@"
