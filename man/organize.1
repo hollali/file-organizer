@@ -1,0 +1,125 @@
+.TH ORGANIZE 1 "November 2026" "organize.sh 1.3.1" "User Commands"
+.SH NAME
+organize.sh \- sort files and folders into category folders
+.SH SYNOPSIS
+.B organize.sh
+[OPTIONS]
+[DIRECTORY]
+.SH DESCRIPTION
+.B organize.sh
+sorts files in DIRECTORY (the current directory by default) into category
+folders. It recognises TV episodes, series, movies, music, dates, duplicates,
+and custom rules. Moves are logged so they can be undone. A failed run is
+rolled back automatically.
+.SH OPTIONS
+.TP
+.BR \-t,\ \-\-target " DIR"
+Move files into DIR instead of organising in place.
+.TP
+.BR \-r,\ \-\-recursive
+Include files from subdirectories.
+.TP
+.BR \-F,\ \-\-folders
+Also move top-level subdirectories into Folders/.
+.TP
+.BR \-T,\ \-\-tv
+Group episodes as Videos/Show/Season NN/.
+.TP
+.BR \-M,\ \-\-music
+Group tracks as Audio/Artist/Album/.
+.TP
+.B \-\-smart
+Recursively identify series, movies, images, documents and music.
+.TP
+.BR \-H,\ \-\-hidden
+Include hidden files and directories.
+.TP
+.BR \-n,\ \-\-dry-run
+Show planned changes without applying them.
+.TP
+.B \-\-explain
+Print a reason for each move.
+.TP
+.BR \-\-plan " FILE"
+Write planned actions to FILE during a dry run.
+.TP
+.BR \-\-apply-plan " FILE"
+Apply a previously reviewed plan file.
+.TP
+.B \-\-confirm
+Preview the plan, then select moves interactively (requires whiptail).
+.TP
+.BR \-u,\ \-\-undo
+Undo the most recent run in DIRECTORY.
+.TP
+.B \-\-by-date
+Add YYYY/MM subfolders.
+.TP
+.B \-\-dedupe
+Skip files identical to already organised files.
+.TP
+.BR \-\-duplicates " MODE"
+Handling for duplicates: skip, delete, move, or trash.
+.TP
+.BR \-i,\ \-\-include " GLOB"
+Only organise files matching GLOB (repeatable).
+.TP
+.BR \-x,\ \-\-exclude " GLOB"
+Skip files matching GLOB (repeatable).
+.TP
+.BR \-\-min-size,\ \-\-max-size " SIZE"
+Filter by file size (bytes or K/M/G suffix).
+.TP
+.BR \-\-older-than " DAYS"
+Only organise files older than DAYS days.
+.TP
+.B \-\-rename
+Normalise file names while moving.
+.TP
+.BR \-l,\ \-\-link
+Leave a symlink at the original path.
+.TP
+.BR \-\-rules " FILE"
+Load custom rules and aliases from FILE.
+.TP
+.BR \-\-config " FILE"
+Load default options from FILE.
+.TP
+.B \-\-json
+Print the summary as JSON.
+.TP
+.BR \-\-watch " [SEC]"
+Organise repeatedly every SEC seconds (default 5).
+.TP
+.BR \-\-schedule " TIMES[@DIR]"
+Install daily cron jobs.
+.TP
+.B \-\-unschedule
+Remove cron jobs for DIRECTORY.
+.TP
+.BR \-\-install-timer " TIMES[@DIR]"
+Install systemd user timers.
+.TP
+.B \-\-uninstall-timer
+Remove systemd user timers for DIRECTORY.
+.TP
+.B \-\-doctor
+Check dependencies.
+.TP
+.B \-\-version
+Print the version and exit.
+.SH FILES
+.TP
+.I ~/.config/organize/config.conf
+Default command-line options.
+.TP
+.I ~/.config/organize/rules.conf
+Custom rules, categories and aliases.
+.TP
+.I DIRECTORY/.organize-log-*.log
+Undo logs (NUL-delimited).
+.SH SEE ALSO
+.BR find (1),
+.BR mv (1),
+.BR crontab (5),
+.BR systemctl (1)

@@ -24,9 +24,10 @@ jobs:
         run: |
           bash -n organize.sh
           bash -n tests/test.sh
+          bash -n tests/fuzz.sh
 
       - name: ShellCheck
-        run: shellcheck --severity=warning organize.sh tests/test.sh
+        run: shellcheck --severity=warning organize.sh tests/test.sh tests/fuzz.sh
 
       - name: shfmt
         run: |
@@ -44,6 +45,9 @@ jobs:
 
       - name: Run tests
         run: bash tests/test.sh
+
+      - name: Run fuzz test
+        run: bash tests/fuzz.sh
 
   test-alpine:
     name: Test (Alpine / BusyBox)

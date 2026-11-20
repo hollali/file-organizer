@@ -102,6 +102,47 @@ expect_file sample.mkv
 expect_absent Videos
 expect_contains "$out" "left in place (unidentified video)"
 
+printf 'series name variants share one folder\n'
+mkdir -p "$ROOT/variants/Breaking Bad" "$ROOT/variants/Cafe"
+workdir variants
+touch "Breaking.Bad.S01E01.mkv" "breaking_bad.S01E02.mkv" "Breaking-Bad.1x03.mkv" \
+	"Café.S01E01.mkv" "Cafe.S01E02.mkv"
+out=$(run . 2>&1) || fail "variant run failed: $out"
+expect_file "Breaking Bad/Season 01/Breaking.Bad.S01E01.mkv"
+expect_file "Breaking Bad/Season 01/breaking_bad.S01E02.mkv"
+expect_file "Breaking Bad/Season 01/Breaking-Bad.1x03.mkv"
+expect_file "Cafe/Season 01/Café.S01E01.mkv"
+expect_file "Cafe/Season 01/Cafe.S01E02.mkv"
+expect_absent "breaking_bad"
+expect_absent "Café"
+
+printf 'tv mode reuses folders across case variants\n'
+mkdir -p "$ROOT/tvcase/Videos/Show"
+workdir tvcase
+touch "Show.S01E01.mkv" "show.S01E02.mkv" "SHOW.1x03.mkv"
+out=$(run --tv . 2>&1) || fail "tv case run failed: $out"
+expect_file "Videos/Show/Season 01/Show.S01E01.mkv"
+expect_file "Videos/Show/Season 01/show.S01E02.mkv"
+expect_file "Videos/Show/Season 01/SHOW.1x03.mkv"
+expect_absent Videos/show
+expect_absent Videos/SHOW
+
+printf 'existing split series folders merge and undo\n'
+mkdir -p "$ROOT/merge/Breaking Bad/Season 01" "$ROOT/merge/Breaking-Bad/Season 01"
+workdir merge
+printf a >"Breaking Bad/Season 01/ep1.mkv"
+printf b >"Breaking-Bad/Season 01/ep2.mkv"
+out=$(run -n . 2>&1) || fail "merge dry run failed: $out"
+expect_contains "$out" "would move:"
+expect_file "Breaking-Bad/Season 01/ep2.mkv"
+run . >/dev/null 2>&1 || fail "merge run failed"
+expect_absent Breaking-Bad
+expect_file "Breaking Bad/Season 01/ep1.mkv"
+expect_file "Breaking Bad/Season 01/ep2.mkv"
+run -u . >/dev/null 2>&1 || fail "merge undo failed"
+expect_file "Breaking-Bad/Season 01/ep2.mkv"
+expect_absent "Breaking Bad/Season 01/ep2.mkv"
+
 printf 'date sorting and undo\n'
 mkdir -p "$ROOT/dates"
 workdir dates
@@ -151,6 +192,18 @@ expect_file delete-me.pdf
 expect_contains "$out" "would delete"
 run --duplicates delete . >/dev/null 2>&1 || fail "duplicate delete failed"
 expect_absent delete-me.pdf
+out=$(run -u . 2>&1) || fail "delete undo failed: $out"
+expect_file delete-me.pdf
+expect_contains "$out" "restored: $ROOT/dedupe/delete-me.pdf"
+if compgen -G '.organize-deleted' >/dev/null; then
+	fail "delete backup left behind"
+fi
+printf 'abc\n' >purge-me.pdf
+run --duplicates delete . >/dev/null 2>&1 || fail "backup purge setup failed"
+expect_dir .organize-deleted
+printf 'fresh' >fresh.txt
+run . >/dev/null 2>&1 || fail "purge run failed"
+expect_absent .organize-deleted
 
 printf 'hidden files and directories\n'
 mkdir -p "$ROOT/hidden/.git" "$ROOT/hidden/sub/.cache"
@@ -207,6 +260,10 @@ expect_absent dup.pdf
 expect_absent Duplicates
 expect_file "$XDG_DATA_HOME/Trash/files/dup.pdf"
 expect_file "$XDG_DATA_HOME/Trash/info/dup.pdf.trashinfo"
+out=$(run -u . 2>&1) || fail "trash undo failed: $out"
+expect_file dup.pdf
+expect_absent "$XDG_DATA_HOME/Trash/files/dup.pdf"
+expect_absent "$XDG_DATA_HOME/Trash/info/dup.pdf.trashinfo"
 
 printf 'include and exclude globs\n'
 mkdir -p "$ROOT/globs"
@@ -405,7 +462,7 @@ expect_file "Movies/The Matrix (1999)/The Matrix [1999] BluRay.mkv"
 expect_contains "$out" "Movies"
 
 printf 'schedule multiple times per day\n'
-mkdir -p "$ROOT/bin" "$ROOT/sched"
+mkdir -p "$ROOT/bin" "$ROOT/sched" "$ROOT/sched2"
 cat >"$ROOT/bin/crontab" <<'STUB'
 #!/usr/bin/env bash
 file=${CRONTAB_FILE:?}
@@ -427,16 +484,186 @@ expect_file keep.png
 expect_absent Images
 expect_contains "$out" "Scheduled: 08:00, 09:30, 18:00 daily"
 expect_contains "$(cat "$CRONTAB_FILE")" "existing job"
-expect_contains "$(cat "$CRONTAB_FILE")" "0 8 * * * $ROOT/bin/organize $ROOT/sched #organize-cron"
-expect_contains "$(cat "$CRONTAB_FILE")" "30 9 * * * $ROOT/bin/organize $ROOT/sched #organize-cron"
-expect_contains "$(cat "$CRONTAB_FILE")" "0 18 * * * $ROOT/bin/organize $ROOT/sched #organize-cron"
-[[ $(grep -c '#organize-cron' "$CRONTAB_FILE") -eq 3 ]] || fail "expected 3 cron lines"
+marker=$(printf '%s' "$ROOT/sched" | cksum)
+marker="#organize-cron:${marker%% *}"
+expect_contains "$(cat "$CRONTAB_FILE")" "0 8 * * * $ROOT/bin/organize $ROOT/sched $marker"
+expect_contains "$(cat "$CRONTAB_FILE")" "30 9 * * * $ROOT/bin/organize $ROOT/sched $marker"
+expect_contains "$(cat "$CRONTAB_FILE")" "0 18 * * * $ROOT/bin/organize $ROOT/sched $marker"
+[[ $(grep -F -c "$marker" "$CRONTAB_FILE") -eq 3 ]] || fail "expected 3 cron lines"
 out=$(run --schedule '06:00@.' 2>&1) || fail "reschedule failed: $out"
-[[ $(grep -c '#organize-cron' "$CRONTAB_FILE") -eq 1 ]] || fail "reschedule did not replace jobs"
+[[ $(grep -F -c "$marker" "$CRONTAB_FILE") -eq 1 ]] || fail "reschedule did not replace jobs"
+
+printf 'scheduling another directory keeps existing jobs\n'
+marker2=$(printf '%s' "$ROOT/sched2" | cksum)
+marker2="#organize-cron:${marker2%% *}"
+workdir sched2
+touch keep2.png
+out=$(run --schedule '07:00@.' 2>&1) || fail "second schedule failed: $out"
+expect_contains "$(cat "$CRONTAB_FILE")" "existing job"
+expect_contains "$(cat "$CRONTAB_FILE")" "$marker"
+expect_contains "$(cat "$CRONTAB_FILE")" "$marker2"
+[[ $(grep -F -c "$marker" "$CRONTAB_FILE") -eq 1 ]] || fail "scheduling wiped another directory"
+[[ $(grep -F -c "$marker2" "$CRONTAB_FILE") -eq 1 ]] || fail "second directory was not scheduled"
+
+printf 'unschedule only removes the current directory\n'
+workdir sched
 out=$(run --unschedule 2>&1) || fail "unschedule failed: $out"
 expect_contains "$out" "Removed scheduled job"
+if grep -Fq "$marker" "$CRONTAB_FILE"; then
+	fail "unschedule left cron lines for $ROOT/sched"
+fi
+expect_contains "$(cat "$CRONTAB_FILE")" "$marker2"
 expect_contains "$(cat "$CRONTAB_FILE")" "existing job"
-[[ $(grep -c '#organize-cron' "$CRONTAB_FILE") -eq 0 ]] || fail "unschedule left cron lines"
+workdir sched2
+out=$(run --unschedule 2>&1) || fail "second unschedule failed: $out"
+expect_contains "$(cat "$CRONTAB_FILE")" "existing job"
+[[ $(grep -F -c '#organize-cron' "$CRONTAB_FILE") -eq 0 ]] || fail "unschedule left cron lines"
+
+printf 'filenames with tabs and newlines\n'
+mkdir -p "$ROOT/weird"
+workdir weird
+printf x >$'tab\tname.pdf'
+printf y >$'new\nline.png'
+out=$(run . 2>&1) || fail "weird run failed: $out"
+out=$(run -u . 2>&1) || fail "weird undo failed: $out"
+expect_file $'tab\tname.pdf'
+expect_file $'new\nline.png'
+expect_absent Images
+expect_absent Documents
+
+printf 'failed run rolls back\n'
+mkdir -p "$ROOT/rollback" "$ROOT/rollback-bin"
+cat >"$ROOT/rollback-bin/mv" <<'STUB'
+#!/usr/bin/env bash
+f=${MV_COUNT_FILE:?}
+n=0; [[ -f $f ]] && n=$(cat "$f")
+n=$((n + 1)); printf '%s' "$n" >"$f"
+if ((n == 2)); then printf 'simulated mv failure\n' >&2; exit 1; fi
+exec /bin/mv "$@"
+STUB
+chmod +x "$ROOT/rollback-bin/mv"
+workdir rollback
+printf a >a.png
+printf b >b.pdf
+out=$(
+	MV_COUNT_FILE="$ROOT/mv-count" PATH="$ROOT/rollback-bin:$PATH" \
+		"$BASH_BIN" "$SCRIPT" . 2>&1
+) && fail "expected the failing run to fail"
+expect_contains "$out" "rolling back"
+expect_contains "$out" "rollback complete"
+expect_file a.png
+expect_file b.pdf
+expect_absent Images
+expect_absent Documents
+if compgen -G '.organize-log-*.log' >/dev/null; then
+	fail "rollback left a log file"
+fi
+
+printf 'explain output\n'
+mkdir -p "$ROOT/explain"
+workdir explain
+touch a.png "Show.S01E01.mkv"
+out=$(run --explain -n . 2>&1) || fail "explain run failed: $out"
+expect_contains "$out" "why:"
+expect_contains "$out" "extension .png"
+expect_contains "$out" "TV episode:"
+
+printf 'alias rules\n'
+mkdir -p "$ROOT/aliastest"
+workdir aliastest
+printf '@alias "The Office UK" -> The Office (US)\n' >rules.conf
+touch "The.Office.UK.S01E01.mkv"
+run --rules rules.conf . >/dev/null 2>&1 || fail "alias run failed"
+expect_file "The Office (US)/Season 01/The.Office.UK.S01E01.mkv"
+expect_file rules.conf
+
+printf 'plan file and apply\n'
+mkdir -p "$ROOT/plantest"
+workdir plantest
+touch a.png b.pdf
+run -n --plan "$ROOT/plan.bin" . >/dev/null 2>&1 || fail "plan run failed"
+expect_file a.png
+expect_file b.pdf
+[[ -s $ROOT/plan.bin ]] || fail "plan file is empty"
+out=$(run --apply-plan "$ROOT/plan.bin" 2>&1) || fail "apply plan failed: $out"
+expect_file Images/a.png
+expect_file Documents/b.pdf
+
+printf 'systemd timer install and remove\n'
+mkdir -p "$ROOT/timertest"
+workdir timertest
+out=$(run --install-timer '08:30,20:00@.' 2>&1) || fail "timer install failed: $out"
+expect_contains "$out" "Installed organize-"
+tsum=$(printf '%s' "$ROOT/timertest" | cksum)
+unit="organize-${tsum%% *}"
+expect_file "$XDG_CONFIG_HOME/systemd/user/$unit.service"
+expect_contains "$(cat "$XDG_CONFIG_HOME/systemd/user/$unit.timer")" "OnCalendar=*-*-* 08:30:00"
+expect_contains "$(cat "$XDG_CONFIG_HOME/systemd/user/$unit.timer")" "OnCalendar=*-*-* 20:00:00"
+out=$(run --uninstall-timer 2>&1) || fail "timer remove failed: $out"
+expect_absent "$XDG_CONFIG_HOME/systemd/user/$unit.timer"
+expect_absent "$XDG_CONFIG_HOME/systemd/user/$unit.service"
+
+printf 'smart mode warns about XDG destinations\n'
+mkdir -p "$ROOT/smartwarn"
+workdir smartwarn
+printf pic >warnphoto.jpg
+out=$(run --smart . 2>&1) || fail "smart warning run failed: $out"
+expect_contains "$out" "outside"
+expect_contains "$out" "--use-xdg-dirs"
+
+printf 'smart mode with target keeps media inside target\n'
+mkdir -p "$ROOT/smarttarget/src" "$ROOT/smarttarget/out"
+workdir smarttarget
+printf pic >src/targetphoto.jpg
+printf doc >src/targetnotes.txt
+out=$(run --smart -t out src 2>&1) || fail "smart target run failed: $out"
+expect_file "out/Pictures/$(date +%Y/%m)/targetphoto.jpg"
+expect_file out/Documents/Text/targetnotes.txt
+expect_absent "$HOME/Pictures/$(date +%Y/%m)/targetphoto.jpg"
+expect_absent "$HOME/Documents/Text/targetnotes.txt"
+
+printf 'smart mode honors --use-xdg-dirs with target\n'
+mkdir -p "$ROOT/smartxdg/src" "$ROOT/smartxdg/out"
+workdir smartxdg
+printf pic >src/xdgphoto.jpg
+out=$(run --smart --use-xdg-dirs -t out src 2>&1) || fail "smart xdg run failed: $out"
+expect_file "$HOME/Pictures/$(date +%Y/%m)/xdgphoto.jpg"
+expect_absent out/Pictures
+
+printf 'watch mode\n'
+if command -v timeout >/dev/null 2>&1; then
+	mkdir -p "$ROOT/watchtest"
+	workdir watchtest
+	touch a.png half.part
+	set +e
+	timeout 5 "$BASH_BIN" "$SCRIPT" --watch 1 . >/dev/null 2>&1
+	wt=$?
+	set -e
+	[[ $wt -eq 124 ]] || fail "watch mode should keep running (got $wt)"
+	expect_file Images/a.png
+	expect_file half.part
+	expect_absent Images/half.part
+fi
+
+printf 'reorganize existing folders\n'
+mkdir -p "$ROOT/reorg/Images" "$ROOT/reorg/Documents" "$ROOT/reorg/Old Shows/Season 1"
+workdir reorg
+printf pic >Images/photo.png
+printf doc >Documents/notes.txt
+printf ep >"Old Shows/Season 1/e01.mkv"
+printf '*.png -> Pictures\n' >rules.conf
+out=$(run -n --rules rules.conf -R . 2>&1) || fail "reorganize dry run failed: $out"
+expect_contains "$out" "would move:"
+expect_file Images/photo.png
+out=$(run --rules rules.conf -R . 2>&1) || fail "reorganize run failed: $out"
+expect_file Pictures/photo.png
+expect_file Documents/notes.txt
+expect_file "Old Shows/Season 1/e01.mkv"
+expect_absent Images
+expect_contains "$out" "already organized: $ROOT/reorg/Documents/notes.txt"
+run -u . >/dev/null 2>&1 || fail "reorganize undo failed"
+expect_file Images/photo.png
+expect_file "Old Shows/Season 1/e01.mkv"
 
 printf 'menu requires a terminal\n'
 out=$(run --menu . </dev/null 2>&1) || true

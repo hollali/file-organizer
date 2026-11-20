@@ -13,6 +13,7 @@ VERSION="1.3.1"
 set -euo pipefail
 
 SCRIPT_PATH=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")
+ORIGINAL_ARGS=("$@")
 
 acquire_lock() {
 	local lockdir
@@ -31,11 +32,25 @@ acquire_lock() {
 			fi
 		fi
 		printf '%s\n' $$ >"$lockdir.pid"
-		trap 'rm -f "$lockdir.pid" 2>/dev/null' EXIT
+		LOCK_PID_FILE=$lockdir.pid
 	fi
 }
 
 DRY_RUN=0
+EXPLAIN=0
+CONFIRM=0
+REORGANIZE=0
+USE_XDG_DIRS=0
+XDG_DEST=1
+WATCH_PREV_SNAP=""
+WATCH=0
+WATCH_INTERVAL=5
+TIMER_MODE=0
+UNINSTALL_TIMER=0
+PLAN_FILE=""
+PLAN_TEMP=""
+APPLY_PLAN=""
+LOCK_PID_FILE=""
 RECURSIVE=0
 MOVE_FOLDERS=0
 INCLUDE_HIDDEN=0
@@ -71,6 +86,7 @@ INCLUDE_PATTERNS=()
 EXCLUDE_PATTERNS=()
 CONFIG_ARGS=()
 declare -A SIZE_INDEX=()
+declare -A ALIASES=()
 declare -A HASH_CACHE=()
 declare -A SEEN_HASH=()
 declare -A COUNT_BY_CAT=()
@@ -108,6 +124,10 @@ Videos/ dump folder is ever created (TV mode uses Videos/Show/Season NN/).
 Options:
   -t, --target DIR   Move files into DIR instead of organizing in place
   -r, --recursive    Include files in subdirectories (moved to DIRECTORY/category)
+  -R, --reorganize   Re-scan existing category and show folders and re-file them
+                     according to the current rules and options (undoable)
+      --use-xdg-dirs Allow --smart to send images/documents to XDG user dirs
+                     outside the organized folder (prints a warning otherwise)
   -F, --folders      Also move top-level subdirectories into Folders/
   -T, --tv           Group TV episodes as Videos/Show/Season NN/;
                      unrecognized videos stay in place
@@ -126,6 +146,10 @@ Options:
       --media        Alias for --smart
   -H, --hidden       Include hidden files
   -n, --dry-run      Show what would happen without moving anything
+      --explain      Print why each file was placed where it was
+      --plan FILE    Write the planned actions to FILE during a dry run
+      --apply-plan FILE  Execute a reviewed plan file
+      --confirm      Preview, then confirm or reject individual moves (whiptail)
   -u, --undo         Undo the most recent run in the given directory
       --by-date      Group files as Category/YYYY/MM/
       --dedupe       Skip files identical to ones already organized
@@ -146,7 +170,10 @@ Options:
       --install-deps Attempt to install missing dependencies (requires sudo)
       --schedule TIMES[@DIR] Schedule daily runs at TIMES (HH:MM[,HH:MM...]) for DIR
                      (e.g. 09:00,15:00,21:00@~/Downloads)
-      --unschedule   Remove scheduled cron job
+      --unschedule   Remove scheduled cron jobs for the current directory
+      --watch [SEC]  Organize repeatedly every SEC seconds (default 5)
+      --install-timer TIMES[@DIR]  Install systemd user timers for DIR
+      --uninstall-timer  Remove systemd timers for the current directory
   -h, --help         Show this help
 EOF
 }
@@ -154,6 +181,73 @@ EOF
 die() {
 	printf 'organize: %s\n' "$*" >&2
 	exit 1
+}
+
+CRON_MARKER=""
+CRON_LEGACY_DIR=""
+
+prepare_cron_identity() {
+	local dir=$1 out
+	out=$(printf '%s' "$dir" | cksum) || out="0 0"
+	CRON_MARKER="#organize-cron:${out%% *}"
+	CRON_LEGACY_DIR=$(printf '%q' "$dir")
+}
+
+is_our_cron_line() {
+	local line=$1
+	[[ $line == *"$CRON_MARKER"* ]] && return 0
+	[[ -n $CRON_LEGACY_DIR && $line == *" $CRON_LEGACY_DIR #organize-cron" ]] && return 0
+	return 1
+}
+
+filter_our_cron_lines() {
+	local line
+	while IFS= read -r line; do
+		is_our_cron_line "$line" || printf '%s\n' "$line"
+	done
+}
+
+timer_unit_dir() {
+	printf '%s/systemd/user' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+install_timer() {
+	local times=$1 dir=$2 unit unit_dir line hour min
+	local -a specs=()
+	prepare_cron_identity "$dir"
+	unit=organize-${CRON_MARKER##*:}
+	unit_dir=$(timer_unit_dir)
+	mkdir -p -- "$unit_dir" || die "cannot create $unit_dir"
+	IFS=',' read -r -a specs <<<"$times"
+	for line in "${specs[@]}"; do
+		[[ $line =~ ^([0-9]{1,2}):([0-9]{2})$ ]] || die "invalid time: $line (use HH:MM)"
+		hour=$((10#${BASH_REMATCH[1]}))
+		min=$((10#${BASH_REMATCH[2]}))
+		((hour <= 23 && min <= 59)) || die "invalid time: $line"
+	done
+	{
+		printf '[Unit]\nDescription=Organize files in %s\n\n[Service]\nType=oneshot\nExecStart="%s" "%s"\n' \
+			"$dir" "$SCRIPT_PATH" "$dir"
+	} >"$unit_dir/$unit.service"
+	{
+		printf '[Unit]\nDescription=Daily organization for %s\n\n[Timer]\n' "$dir"
+		for line in "${specs[@]}"; do
+			IFS=: read -r hour min <<<"$line"
+			printf 'OnCalendar=*-*-* %02d:%02d:00\n' "$((10#$hour))" "$((10#$min))"
+		done
+		printf 'Persistent=true\n\n[Install]\nWantedBy=timers.target\n'
+	} >"$unit_dir/$unit.timer"
+	printf 'Installed %s in %s\n' "$unit" "$unit_dir"
+	printf 'Enable it with: systemctl --user enable --now %s.timer\n' "$unit"
+}
+
+uninstall_timer() {
+	local unit unit_dir
+	prepare_cron_identity "$DIR"
+	unit=organize-${CRON_MARKER##*:}
+	unit_dir=$(timer_unit_dir)
+	rm -f -- "$unit_dir/$unit.service" "$unit_dir/$unit.timer"
+	printf 'Removed %s timer\n' "$unit"
 }
 
 doctor_deps() {
@@ -166,7 +260,7 @@ doctor_deps() {
 		printf '  [WARN] bash version may be too old (need >= 4)\n'
 		warn=$((warn + 1))
 	fi
-	for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum; do
+	for cmd in find mv mkdir rm basename dirname date tr stat sort sha256sum cksum; do
 		if command -v "$cmd" >/dev/null 2>&1; then
 			printf '  [OK] %s\n' "$cmd"
 			ok=$((ok + 1))
@@ -290,6 +384,15 @@ while (($# > 0)); do
 		RECURSIVE=1
 		shift
 		;;
+	-R | --reorganize)
+		REORGANIZE=1
+		RECURSIVE=1
+		shift
+		;;
+	--use-xdg-dirs)
+		USE_XDG_DIRS=1
+		shift
+		;;
 	-F | --folders)
 		MOVE_FOLDERS=1
 		shift
@@ -317,6 +420,43 @@ while (($# > 0)); do
 		;;
 	-n | --dry-run)
 		DRY_RUN=1
+		shift
+		;;
+	--explain)
+		EXPLAIN=1
+		shift
+		;;
+	--plan)
+		(($# >= 2)) || die "option $1 requires an argument"
+		PLAN_FILE=$2
+		shift 2
+		;;
+	--apply-plan)
+		(($# >= 2)) || die "option $1 requires an argument"
+		APPLY_PLAN=$2
+		shift 2
+		;;
+	--confirm)
+		CONFIRM=1
+		shift
+		;;
+	--watch)
+		WATCH=1
+		if (($# >= 2)) && [[ $2 =~ ^[0-9]+$ ]]; then
+			WATCH_INTERVAL=$2
+			shift 2
+		else
+			shift
+		fi
+		;;
+	--install-timer)
+		(($# >= 2)) || die "option $1 requires an argument"
+		SCHEDULE=$2
+		TIMER_MODE=1
+		shift 2
+		;;
+	--uninstall-timer)
+		UNINSTALL_TIMER=1
 		shift
 		;;
 	-u | --undo)
@@ -482,6 +622,10 @@ while (($# > 0)); do
 	esac
 done
 
+if ((WATCH && (CONFIRM || MENU))); then
+	die "--watch cannot be combined with --confirm or --menu"
+fi
+
 [[ -z $DIR ]] && DIR=.
 [[ -d $DIR ]] || die "not a directory: $DIR"
 DIR=$(cd -- "$DIR" && pwd)
@@ -489,13 +633,28 @@ TARGET=${TARGET:-$DIR}
 [[ -d $TARGET ]] || mkdir -p -- "$TARGET"
 TARGET=$(cd -- "$TARGET" && pwd)
 
+if ((SMART_MODE)); then
+	if ((USE_XDG_DIRS == 0)) && [[ $TARGET != "$DIR" ]]; then
+		XDG_DEST=0
+	elif ((USE_XDG_DIRS == 0)); then
+		printf 'organize: warning: --smart sends images and documents to XDG user dirs outside %s (~/Pictures, ~/Documents). Pass --use-xdg-dirs to confirm, or --target to keep them inside the target.\n' "$DIR" >&2
+	fi
+fi
+
+if ((UNINSTALL_TIMER)); then
+	uninstall_timer
+	exit 0
+fi
+
 if ((UNSCHEDULE)); then
 	if ! command -v crontab >/dev/null; then
 		die "crontab not found"
 	fi
+	prepare_cron_identity "$DIR"
 	CRONTAB_EXISTING=$(crontab -l 2>/dev/null || true)
-	if [[ $CRONTAB_EXISTING == *"#organize-cron"* ]]; then
-		printf '%s\n' "$CRONTAB_EXISTING" | grep -v "organize.*#organize-cron" | crontab - || true
+	CRONTAB_REMAINING=$(printf '%s\n' "$CRONTAB_EXISTING" | filter_our_cron_lines)
+	if [[ $CRONTAB_REMAINING != "$CRONTAB_EXISTING" ]]; then
+		printf '%s\n' "$CRONTAB_REMAINING" | crontab -
 		echo "Removed scheduled job"
 	else
 		echo "No scheduled job found"
@@ -518,6 +677,7 @@ if [[ -n $SCHEDULE ]]; then
 	esac
 	[[ -d $SCHEDULE_DIR_ARG ]] || die "directory not found: $SCHEDULE_DIR_ARG"
 	SCHEDULE_DIR_ARG=$(cd -- "$SCHEDULE_DIR_ARG" && pwd)
+	prepare_cron_identity "$SCHEDULE_DIR_ARG"
 	ORG_BIN=$(command -v organize 2>/dev/null || echo "$SCRIPT_PATH")
 	if ! command -v crontab >/dev/null; then
 		die "crontab not found; install cron or use systemd timer"
@@ -534,10 +694,14 @@ if [[ -n $SCHEDULE ]]; then
 		if ((SCHEDULE_HOUR > 23 || SCHEDULE_MIN > 59)); then
 			die "invalid time: $schedule_time"
 		fi
-		CRON_LINES+=("$(printf '%d %d * * * %s %s #organize-cron' "$SCHEDULE_MIN" "$SCHEDULE_HOUR" "$(printf '%q' "$ORG_BIN")" "$(printf '%q' "$SCHEDULE_DIR_ARG")")")
+		CRON_LINES+=("$(printf '%d %d * * * %s %s %s' "$SCHEDULE_MIN" "$SCHEDULE_HOUR" "$(printf '%q' "$ORG_BIN")" "$(printf '%q' "$SCHEDULE_DIR_ARG")" "$CRON_MARKER")")
 		SCHEDULE_LABELS+=("$(printf '%02d:%02d' "$SCHEDULE_HOUR" "$SCHEDULE_MIN")")
 	done
-	CRONTAB_EXISTING=$(crontab -l 2>/dev/null | grep -v "organize.*#organize-cron" || true)
+	if ((TIMER_MODE)); then
+		install_timer "$SCHEDULE_TIME" "$SCHEDULE_DIR_ARG"
+		exit 0
+	fi
+	CRONTAB_EXISTING=$(crontab -l 2>/dev/null | filter_our_cron_lines || true)
 	{
 		if [[ -n $CRONTAB_EXISTING ]]; then
 			printf '%s\n' "$CRONTAB_EXISTING"
@@ -550,33 +714,271 @@ if [[ -n $SCHEDULE ]]; then
 		SCHEDULE_LABEL_LIST+=$schedule_label
 	done
 	echo "Scheduled: $SCHEDULE_LABEL_LIST daily for $SCHEDULE_DIR_ARG"
-	echo "To remove: $(printf '%q' "$ORG_BIN") --unschedule"
+	echo "To remove: cd $(printf '%q' "$SCHEDULE_DIR_ARG") && $(printf '%q' "$ORG_BIN") --unschedule"
 	exit 0
 fi
 
+trap on_exit EXIT
 acquire_lock
 
 LOG=""
+MOVES_STARTED=0
+ROLLBACK_ACTIVE=0
+RESTORE_SKIPPED=0
+MOVE_REASON=""
+READ_LOG_TARGET=$DIR
+READ_LOG_SRCS=()
+READ_LOG_DESTS=()
+
+ensure_log() {
+	[[ $DRY_RUN -eq 1 ]] && return 1
+	[[ -n $LOG ]] && return 0
+	LOG=$DIR/.organize-log-$(date +%Y%m%d-%H%M%S)-$$.log
+	printf '#organize-v2\0%s\0' "$TARGET" >"$LOG"
+	return 0
+}
 
 log_move() {
-	[[ $DRY_RUN -eq 1 ]] && return
-	if [[ -z $LOG ]]; then
-		LOG=$DIR/.organize-log-$(date +%Y%m%d-%H%M%S)-$$.log
-		printf '#target\t%s\n' "$TARGET" >"$LOG"
+	ensure_log || return
+	printf '%s\0%s\0' "$1" "$2" >>"$LOG"
+}
+
+record_plan() {
+	[[ -n $PLAN_FILE ]] || return 0
+	printf '%s\0%s\0%s\0' "$1" "$2" "$3" >>"$PLAN_FILE"
+}
+
+apply_plan_file() {
+	local file=$1 type src dest final size skipped=0
+	[[ -f $file ]] || die "plan file not found: $file"
+	while IFS= read -r -d '' type && IFS= read -r -d '' src && IFS= read -r -d '' dest; do
+		if [[ ! -e $src && ! -L $src ]]; then
+			printf 'skip (missing): %s\n' "$src" >&2
+			skipped=$((skipped + 1))
+			continue
+		fi
+		case $type in
+		M)
+			mkdir -p -- "$(dirname -- "$dest")" || return 1
+			final=$(unique_path "$dest" 0)
+			size=$(file_size "$src" 2>/dev/null || printf 0)
+			log_move "$src" "$final"
+			MOVES_STARTED=1
+			mv -- "$src" "$final" || return 1
+			printf 'moved: %s -> %s\n' "$src" "$final"
+			record_move Plan "$size"
+			;;
+		D)
+			stage_deleted "$src" || return 1
+			DUP_DELETED=$((DUP_DELETED + 1))
+			printf 'deleted: %s\n' "$src"
+			;;
+		T)
+			trash_file "$src" || return 1
+			DUP_TRASHED=$((DUP_TRASHED + 1))
+			printf 'trashed: %s\n' "$src"
+			;;
+		*)
+			printf 'unknown plan action: %s\n' "$type" >&2
+			skipped=$((skipped + 1))
+			;;
+		esac
+	done <"$file"
+	((skipped == 0)) || printf 'plan: %d action(s) skipped\n' "$skipped" >&2
+}
+
+confirm_and_apply_plan() {
+	local plan=$1 type src dest i=0 out tmp approved tag
+	local -a items=() selected=()
+	[[ -t 0 ]] || die "--confirm requires an interactive terminal"
+	command -v whiptail >/dev/null 2>&1 || die "whiptail is required for --confirm"
+	while IFS= read -r -d '' type && IFS= read -r -d '' src && IFS= read -r -d '' dest; do
+		i=$((i + 1))
+		items+=("$i" "$(printf '%q -> %q' "$src" "$dest")" on)
+	done <"$plan"
+	((i > 0)) || { printf 'Nothing to organize.\n'; return 0; }
+	tmp=$(mktemp "${TMPDIR:-/tmp}/organize-confirm-XXXXXX") || return 1
+	if ! whiptail --title "Confirm changes" --checklist \
+		"Select the moves to apply:" "$(ui_rows)" "$(ui_cols)" 0 "${items[@]}" 2>"$tmp"; then
+		printf 'No changes applied.\n'
+		rm -f -- "$tmp"
+		return 0
 	fi
-	printf '%s\t%s\n' "$1" "$2" >>"$LOG"
+	read -r -a selected <"$tmp"
+	approved=$(mktemp "${TMPDIR:-/tmp}/organize-approved-XXXXXX") || {
+		rm -f -- "$tmp"
+		return 1
+	}
+	i=0
+	while IFS= read -r -d '' type && IFS= read -r -d '' src && IFS= read -r -d '' dest; do
+		i=$((i + 1))
+		for tag in "${selected[@]}"; do
+			if [[ $tag == "$i" ]]; then
+				printf '%s\0%s\0%s\0' "$type" "$src" "$dest" >>"$approved"
+				break
+			fi
+		done
+	done <"$plan"
+	rm -f -- "$tmp"
+	DRY_RUN=0
+	PLAN_FILE=""
+	apply_plan_file "$approved"
+	rm -f -- "$approved"
+}
+
+watch_snapshot() {
+	local f line ext
+	while IFS= read -r -d '' f; do
+		ext=${f##*.}
+		ext=${ext,,}
+		case $ext in
+		part | crdownload | tmp | partial | download | '!ut') continue ;;
+		esac
+		line=$(stat -c '%n %s %Y' "$f" 2>/dev/null || stat -f '%n %z %m' "$f" 2>/dev/null || true)
+		[[ -n $line ]] && printf '%s\n' "$line"
+	done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null) | LC_ALL=C sort
+}
+
+watch_files_stable() {
+	local snap
+	snap=$(watch_snapshot)
+	if [[ -n $snap && $snap == "$WATCH_PREV_SNAP" ]]; then
+		WATCH_PREV_SNAP=""
+		return 0
+	fi
+	WATCH_PREV_SNAP=$snap
+	return 1
+}
+
+watch_loop() {
+	local -a args=()
+	local use_inotify=0
+	local arg skip=0 i
+	if [[ -n $LOCK_PID_FILE ]]; then
+		rm -f -- "$LOCK_PID_FILE"
+		LOCK_PID_FILE=""
+	fi
+	exec 200>&- 2>/dev/null || true
+	for ((i = 0; i < ${#ORIGINAL_ARGS[@]}; i++)); do
+		arg=${ORIGINAL_ARGS[i]}
+		if [[ $arg == --watch ]]; then
+			skip=1
+			continue
+		fi
+		if ((skip)) && [[ $arg =~ ^[0-9]+$ ]]; then
+			skip=0
+			continue
+		fi
+		skip=0
+		args+=("$arg")
+	done
+	command -v inotifywait >/dev/null 2>&1 && use_inotify=1
+	local mode=polling
+	((use_inotify)) && mode=inotify
+	printf 'Watching %s every %ss with stable-file detection (%s, Ctrl-C to stop)\n' \
+		"$DIR" "$WATCH_INTERVAL" "$mode"
+	trap 'printf "\nStopping watch.\n"; exit 0' INT TERM
+	while :; do
+		if ((use_inotify)); then
+			inotifywait -q -e close_write,moved_to -t "$WATCH_INTERVAL" "$DIR" >/dev/null 2>&1 || true
+		else
+			sleep "$WATCH_INTERVAL"
+		fi
+		if watch_files_stable; then
+			bash "$SCRIPT_PATH" "${args[@]}" \
+				--exclude '*.part' --exclude '*.crdownload' --exclude '*.tmp' \
+				--exclude '*.partial' --exclude '*.download' --exclude '*.!ut' \
+				>/dev/null 2>&1 || true
+		fi
+	done
+}
+
+read_log_entries() {
+	local log=$1 rec src dest i
+	local -a records=()
+	READ_LOG_TARGET=$DIR
+	READ_LOG_SRCS=()
+	READ_LOG_DESTS=()
+	while IFS= read -r -d '' rec; do
+		records+=("$rec")
+	done <"$log"
+	if [[ ${records[0]:-} == '#organize-v2' ]]; then
+		READ_LOG_TARGET=${records[1]:-$DIR}
+		for ((i = 2; i + 1 < ${#records[@]}; i += 2)); do
+			READ_LOG_SRCS+=("${records[i]}")
+			READ_LOG_DESTS+=("${records[i + 1]}")
+		done
+		return 0
+	fi
+	while IFS=$'\t' read -r src dest || [[ -n $src ]]; do
+		if [[ $src == '#target' ]]; then
+			READ_LOG_TARGET=$dest
+			continue
+		fi
+		READ_LOG_SRCS+=("$src")
+		READ_LOG_DESTS+=("$dest")
+	done <"$log"
+}
+
+purge_stale_delete_backups() {
+	local d name latest=""
+	local -a logs=()
+	[[ $DRY_RUN -eq 1 ]] && return 0
+	[[ -d $TARGET/.organize-deleted ]] || return 0
+	shopt -s nullglob
+	logs=("$DIR"/.organize-log-*.log)
+	for d in "${logs[@]}"; do
+		[[ -z $latest || $d -nt $latest ]] && latest=$d
+	done
+	[[ -n $latest ]] || latest="none"
+	for d in "$TARGET"/.organize-deleted/.organize-log-*; do
+		name=$(basename -- "$d")
+		[[ $DIR/$name.log == "$latest" ]] && continue
+		rm -rf -- "$d"
+	done
+	shopt -u nullglob
+	rmdir -- "$TARGET/.organize-deleted" 2>/dev/null || true
 }
 
 is_hidden_name() {
 	[[ $1 == .* && $1 != . && $1 != .. ]]
 }
 
+restore_entries() {
+	local log_target=$1 src dest i
+	RESTORE_SKIPPED=0
+	for ((i = ${#READ_LOG_SRCS[@]} - 1; i >= 0; i--)); do
+		src=${READ_LOG_SRCS[i]}
+		dest=${READ_LOG_DESTS[i]}
+		if [[ ! -e $dest ]]; then
+			printf 'skip (missing): %s\n' "$dest" >&2
+			remove_empty_parents "$dest" "$log_target"
+			continue
+		fi
+		mkdir -p -- "$(dirname -- "$src")"
+		if [[ -L $src && $src -ef $dest ]]; then
+			rm -f -- "$src"
+		elif [[ -e $src ]]; then
+			printf 'skip (target exists): %s\n' "$src" >&2
+			RESTORE_SKIPPED=$((RESTORE_SKIPPED + 1))
+			continue
+		fi
+		if ! mv -- "$dest" "$src"; then
+			printf 'skip (move failed): %s\n' "$dest" >&2
+			RESTORE_SKIPPED=$((RESTORE_SKIPPED + 1))
+			continue
+		fi
+		if [[ $dest == */Trash/files/* ]]; then
+			rm -f -- "${dest%/files/*}/info/$(basename -- "$dest").trashinfo"
+		fi
+		remove_empty_parents "$dest" "$log_target"
+		printf 'restored: %s\n' "$src"
+	done
+}
+
 undo_last() {
-	local log latest src dest i
-	local log_target=$DIR
+	local log latest
 	local -a logs=()
-	local -a srcs=()
-	local -a dests=()
 
 	shopt -s nullglob
 	logs=("$DIR"/.organize-log-*.log)
@@ -589,43 +991,38 @@ undo_last() {
 		[[ $log -nt $latest ]] && latest=$log
 	done
 
-	while IFS=$'\t' read -r src dest; do
-		if [[ $src == '#target' ]]; then
-			log_target=$dest
-			continue
-		fi
-		srcs+=("$src")
-		dests+=("$dest")
-	done <"$latest"
-
-	if ((${#srcs[@]} == 0)); then
+	read_log_entries "$latest"
+	if ((${#READ_LOG_SRCS[@]} == 0)); then
 		rm -f -- "$latest"
 		printf 'Nothing to undo.\n'
 		return
 	fi
 
-	for ((i = ${#srcs[@]} - 1; i >= 0; i--)); do
-		src=${srcs[i]}
-		dest=${dests[i]}
-
-		if [[ ! -e $dest ]]; then
-			printf 'skip (missing): %s\n' "$dest" >&2
-			continue
-		fi
-		mkdir -p -- "$(dirname -- "$src")"
-		if [[ -L $src && $src -ef $dest ]]; then
-			rm -f -- "$src"
-		elif [[ -e $src ]]; then
-			printf 'skip (target exists): %s\n' "$src" >&2
-			continue
-		fi
-		mv -- "$dest" "$src"
-		remove_empty_parents "$dest" "$log_target"
-		printf 'restored: %s\n' "$src"
-	done
-
+	restore_entries "$READ_LOG_TARGET"
 	rm -f -- "$latest"
 	printf 'Undo complete.\n'
+}
+
+on_exit() {
+	local status=$?
+	trap - EXIT
+	[[ -n $LOCK_PID_FILE ]] && rm -f -- "$LOCK_PID_FILE" 2>/dev/null || true
+	[[ -n $PLAN_TEMP ]] && rm -f -- "$PLAN_TEMP" 2>/dev/null || true
+	if ((status != 0 && MOVES_STARTED == 1 && ROLLBACK_ACTIVE == 0 && DRY_RUN == 0)); then
+		ROLLBACK_ACTIVE=1
+		printf 'organize: error detected - rolling back this run...\n' >&2
+		if [[ -n $LOG && -f $LOG ]]; then
+			read_log_entries "$LOG"
+			restore_entries "$READ_LOG_TARGET"
+			if ((RESTORE_SKIPPED == 0)); then
+				rm -f -- "$LOG"
+				printf 'organize: rollback complete.\n' >&2
+			else
+				printf 'organize: rollback incomplete; run --undo to finish.\n' >&2
+			fi
+		fi
+	fi
+	exit "$status"
 }
 
 # Remove now-empty folders left behind by the organizer, stopping at the
@@ -721,10 +1118,10 @@ tv_category() {
 		return 1
 	fi
 
-	show=$(clean_show_name "$show")
+	show=$(smart_show_name "$show")
 	[[ -n $show ]] || return 1
 
-	printf 'Videos/%s/Season %02d\n' "$show" "$((10#$season))"
+	series_rel "$show" "$((10#$season))" /Videos
 }
 
 # Turn a name into a single safe path component: no slashes, trimmed,
@@ -820,6 +1217,15 @@ rename_basename() {
 # Resolve an XDG user directory (Pictures, Documents) without depending on
 # xdg-user-dir being installed. Honors the environment variable first, then
 # the tool, then the conventional ~/Name fallback.
+media_user_dir() {
+	local key=$1 fallback=$2
+	if ((XDG_DEST)); then
+		xdg_user_dir "$key" "$fallback"
+	else
+		printf '%s/%s\n' "$TARGET" "$fallback"
+	fi
+}
+
 xdg_user_dir() {
 	local key=$1 fallback=$2 var val
 	case $key in
@@ -846,27 +1252,59 @@ xdg_user_dir() {
 	printf '%s/%s' "$HOME" "$fallback"
 }
 
-# Find an existing child directory of PARENT whose name equals WANT, ignoring
-# case, so a library never gains a second folder that differs only in case.
-# Prints the resolved absolute path (whether or not it exists yet).
+fold_diacritics() {
+	local s=$1 i
+	local -a from=(á à â ä ã å ç é è ê ë í ì î ï ñ ó ò ô ö õ ú ù û ü ý ÿ æ œ ø ß Á À Â Ä Ã Å Ç É È Ê Ë Í Ì Î Ï Ñ Ó Ò Ô Ö Õ Ú Ù Û Ü Ý Ÿ Æ Œ Ø)
+	local -a to=(a a a a a a c e e e e i i i i n o o o o o u u u u y y ae oe o ss a a a a a a c e e e e i i i i n o o o o o u u u u y y ae oe o)
+	for ((i = 0; i < ${#from[@]}; i++)); do
+		s=${s//"${from[i]}"/"${to[i]}"}
+	done
+	printf '%s' "$s"
+}
+
+# Canonical comparison key for a media name: case, accents, separators and
+# punctuation are ignored so "Breaking.Bad", "breaking_bad" and "Breaking-Bad"
+# all resolve to the same folder.
+name_key() {
+	local s
+	s=$(fold_diacritics "${1,,}")
+	s=${s//&/ and }
+	s=${s//[^[:alnum:] ]/ }
+	while [[ $s == *"  "* ]]; do
+		s=${s//  / }
+	done
+	s=${s#"${s%%[! ]*}"}
+	s=${s%"${s##*[! ]}"}
+	printf '%s' "$s"
+}
+
+apply_alias() {
+	local name=$1 key
+	key=$(name_key "$name")
+	[[ -n $key && -n ${ALIASES[$key]:-} ]] && printf '%s' "${ALIASES[$key]}" || printf '%s' "$name"
+}
+
+# Find an existing child directory of PARENT whose name matches WANT by its
+# normalized key, so a library never gains a second folder for the same series
+# just because of case, punctuation or accents. Prints the resolved absolute
+# path (whether or not it exists yet).
 resolve_child_dir() {
-	local parent=$1 want=$2 d base
+	local parent=$1 want=$2 d base want_key base_key
 	[[ -d $parent ]] || {
 		printf '%s/%s\n' "$parent" "$want"
 		return
 	}
+	want_key=$(name_key "$want")
 	shopt -s nullglob
 	for d in "$parent"/*/; do
 		base=${d%/}
 		base=${base##*/}
-		shopt -s nocasematch
-		if [[ $base == "$want" ]]; then
-			shopt -u nocasematch
+		base_key=$(name_key "$base")
+		if [[ -n $want_key && $base_key == "$want_key" ]]; then
 			shopt -u nullglob
 			printf '%s\n' "${d%/}"
 			return
 		fi
-		shopt -u nocasematch
 	done
 	shopt -u nullglob
 	printf '%s/%s\n' "$parent" "$want"
@@ -920,7 +1358,7 @@ smart_show_name() {
 		s="${s%%\(*} ${s#*\)}"
 	done
 	s=$(sanitize_component "$s")
-	printf '%s' "$s"
+	apply_alias "$s"
 }
 
 # Return the season number when NAME is a season folder such as
@@ -1112,7 +1550,7 @@ detect_movie() {
 		;;
 	esac
 
-	SMART_TITLE=$out
+	SMART_TITLE=$(apply_alias "$out")
 	SMART_YEAR=$year
 	return 0
 }
@@ -1184,10 +1622,73 @@ is_sidecar_file() {
 # Canonical relative destination for an episode. Series live directly under
 # the target so one show is one folder (no generic Videos wrapper).
 series_rel() {
-	local show=$1 season=$2 cur
-	cur=$(resolve_child_dir "$TARGET" "$show")
+	local show=$1 season=$2 root=${3:-} cur
+	cur=$(resolve_child_dir "$TARGET$root" "$show")
 	cur=$(resolve_season_dir "$cur" "$season")
 	printf '%s\n' "${cur#"$TARGET"/}"
+}
+
+dir_has_video() {
+	local d=$1 f ext
+	while IFS= read -r -d '' f; do
+		ext=${f##*.}
+		ext=${ext,,}
+		[[ $(category_for "$ext") == Videos ]] && return 0
+	done < <(find "$d" -maxdepth 3 -type f -print0 2>/dev/null)
+	return 1
+}
+
+# Consolidate sibling folders that belong to the same series but were created
+# with different spelling, case or punctuation. Every move is logged so it can
+# be reverted with --undo.
+merge_variant_dirs() {
+	local parent=$1 d base key canonical variant f rel sub s target_dir cat skip
+	local -A seen=()
+	[[ -d $parent ]] || return 0
+	shopt -s nullglob
+	for d in "$parent"/*/; do
+		d=${d%/}
+		base=${d##*/}
+		is_hidden_name "$base" && continue
+		[[ $base == .organize-deleted ]] && continue
+		skip=0
+		for cat in "${CATEGORIES[@]}" Movies Duplicates; do
+			[[ $base == "$cat" ]] && skip=1
+		done
+		((skip)) && continue
+		dir_has_video "$d" || continue
+		key=$(name_key "$base")
+		[[ -n $key ]] || continue
+		if [[ -z ${seen[$key]:-} ]]; then
+			seen[$key]=$d
+			continue
+		fi
+		canonical=${seen[$key]}
+		variant=$d
+		[[ $canonical == "$variant" ]] && continue
+		while IFS= read -r -d '' f; do
+			should_skip "$f" && continue
+			rel=${f#"$variant"/}
+			sub=${rel%/*}
+			[[ $sub == "$rel" ]] && sub=""
+			target_dir=$canonical
+			if [[ -n $sub ]]; then
+				if [[ $sub != */* ]] && s=$(season_from_folder "$sub"); then
+					target_dir=$(resolve_season_dir "$canonical" "$s")
+				else
+					target_dir=$canonical/$sub
+				fi
+			fi
+			move_one "$f" "$target_dir" 0 Merge
+		done < <(find "$variant" -mindepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
+		if [[ $DRY_RUN -eq 0 ]]; then
+			while IFS= read -r -d '' f; do
+				rmdir -- "$f" 2>/dev/null || true
+			done < <(find "$variant" -depth -type d -print0 2>/dev/null)
+		fi
+		seen[$key]=$canonical
+	done
+	shopt -u nullglob
 }
 
 # Canonical relative destination for a movie.
@@ -1316,12 +1817,14 @@ prune_empty_source_dirs() {
 		top=${d#"$DIR"/}
 		top=${top%%/*}
 		skip=0
-		for cat in "${CATEGORIES[@]}"; do
-			if [[ $SMART_MODE -eq 1 && ($cat == Images || $cat == Documents || $cat == Videos) ]]; then
-				continue
-			fi
-			[[ $top == "$cat" ]] && skip=1
-		done
+		if ((REORGANIZE == 0)); then
+			for cat in "${CATEGORIES[@]}"; do
+				if [[ $SMART_MODE -eq 1 && ($cat == Images || $cat == Documents || $cat == Videos) ]]; then
+					continue
+				fi
+				[[ $top == "$cat" ]] && skip=1
+			done
+		fi
 		((skip == 1)) && continue
 		[[ $TARGET != "$DIR" && ($d == "$TARGET" || $d == "$TARGET"/*) ]] && continue
 		rmdir -- "$d" 2>/dev/null || true
@@ -1384,13 +1887,16 @@ smart_organize() {
 		d=$(dirname -- "$src")
 		abs_dir=""
 		label=""
+		MOVE_REASON=""
 		if cat=$(rule_for "$base"); then
 			rel=$cat
 			label=${cat%%/*}
+			MOVE_REASON="custom rule"
 		elif [[ -n ${SMART_DEST[$src]:-} ]]; then
 			rel=${SMART_DEST[$src]}
 			label=Videos
 			[[ $rel == Movies/* ]] && label=Movies
+			MOVE_REASON="detected $label: $rel"
 		else
 			key=$(assoc_key "$base")
 			akey="$d/$key"
@@ -1398,6 +1904,7 @@ smart_organize() {
 				rel=${assoc["$akey"]}
 				label=Videos
 				[[ $rel == Movies/* ]] && label=Movies
+				MOVE_REASON="sidecar matched to $rel"
 			elif is_sidecar_file "$src" && [[ -n ${dir_dest[$d]:-} ]]; then
 				if [[ -n ${dir_ambig[$d]:-} ]]; then
 					printf 'left in place (ambiguous sidecar): %s\n' "$src"
@@ -1406,6 +1913,7 @@ smart_organize() {
 				rel=${dir_dest[$d]}
 				label=Videos
 				[[ $rel == Movies/* ]] && label=Movies
+				MOVE_REASON="sidecar for video in this folder"
 			else
 				if is_sidecar_file "$src"; then
 					printf 'left in place (no matching video for sidecar): %s\n' "$src"
@@ -1423,18 +1931,20 @@ smart_organize() {
 					;;
 				Images)
 					date_dir=$(date_path "$src" "$cat" 2>/dev/null || true)
-					abs_dir=$(xdg_user_dir PICTURES Pictures)
+					abs_dir=$(media_user_dir PICTURES Pictures)
 					ctx=$(context_for "$src") || ctx=""
 					[[ -n $ctx ]] && abs_dir=$abs_dir/$(sanitize_component "$ctx")
 					[[ -n $date_dir ]] && abs_dir=$abs_dir/$date_dir
 					label=Images
+					MOVE_REASON="image detected; filed under Pictures"
 					;;
 				Documents)
-					abs_dir=$(xdg_user_dir DOCUMENTS Documents)
+					abs_dir=$(media_user_dir DOCUMENTS Documents)
 					ctx=$(context_for "$src") || ctx=""
 					[[ -n $ctx ]] && abs_dir=$abs_dir/$(sanitize_component "$ctx")
 					abs_dir=$abs_dir/$(document_type_dir "$ext")
 					label=Documents
+					MOVE_REASON="document detected; filed under Documents"
 					;;
 				Audio)
 					if music_cat=$(music_category "$src"); then
@@ -1443,6 +1953,7 @@ smart_organize() {
 						rel=Audio
 					fi
 					label=Audio
+					MOVE_REASON="audio detected; filed under $rel"
 					;;
 				*)
 					rel=$cat
@@ -1490,8 +2001,23 @@ move_one() {
 	if [[ $RENAME -eq 1 && $is_dir -eq 0 ]]; then
 		name=$(rename_basename "$name")
 	fi
-	dest=$(unique_path "$dest_dir/$name" "$is_dir")
+	local natural=$dest_dir/$name
+	if [[ $natural == "$src" ]] || [[ -e $natural && $src -ef $natural ]]; then
+		printf 'already organized: %s\n' "$src"
+		MOVE_REASON=""
+		return 0
+	fi
+	dest=$(unique_path "$natural" "$is_dir")
 	LAST_DEST=$dest
+
+	if [[ $EXPLAIN -eq 1 && $JSON -eq 0 ]]; then
+		if [[ -n $MOVE_REASON ]]; then
+			printf 'why: %s -> %s (%s)\n' "$src" "$dest" "$MOVE_REASON"
+		else
+			printf 'why: %s -> %s (category %s)\n' "$src" "$dest" "${label:-$cat}"
+		fi
+	fi
+	MOVE_REASON=""
 
 	if [[ $is_dir -eq 0 ]]; then
 		size=$(file_size "$src" 2>/dev/null || printf 0)
@@ -1503,11 +2029,14 @@ move_one() {
 		else
 			printf 'would move: %s -> %s\n' "$src" "$dest"
 		fi
+		record_plan M "$src" "$dest"
 		record_move "${label:-$cat}" "$size"
 		return
 	fi
 
 	mkdir -p -- "$dest_dir"
+	log_move "$src" "$dest"
+	MOVES_STARTED=1
 	mv -- "$src" "$dest"
 	if [[ $LINK -eq 1 ]]; then
 		ln -s -- "$dest" "$src"
@@ -1515,7 +2044,6 @@ move_one() {
 	else
 		printf 'moved: %s -> %s\n' "$src" "$dest"
 	fi
-	log_move "$src" "$dest"
 	record_move "${label:-$cat}" "$size"
 }
 
@@ -1545,6 +2073,26 @@ load_rules() {
 		lineno=$((lineno + 1))
 		line=$(trim "$line")
 		[[ -z $line || $line == \#* ]] && continue
+
+		if [[ $line == @alias* ]]; then
+			line=${line#@alias}
+			line=$(trim "$line")
+			if [[ $line == *'->'* ]]; then
+				pattern=${line%%->*}
+				dest=${line#*->}
+			elif [[ $line == *'=>'* ]]; then
+				pattern=${line%%=>*}
+				dest=${line#*=>}
+			else
+				die "rules: $file:$lineno: expected '@alias NAME -> CANONICAL'"
+			fi
+			pattern=$(trim "$pattern")
+			dest=$(trim "$dest")
+			[[ -n $pattern && -n $dest ]] || die "rules: $file:$lineno: empty alias"
+			[[ $dest == */* ]] && die "rules: $file:$lineno: canonical name must not contain '/'"
+			ALIASES["$(name_key "$pattern")"]=$dest
+			continue
+		fi
 
 		if [[ $line == @category* ]]; then
 			line=${line#@category}
@@ -1684,6 +2232,22 @@ file_filters_skip() {
 	return 1
 }
 
+stage_deleted() {
+	local src=$1 stage_dir stage_file base n=0
+	ensure_log || return 1
+	stage_dir=$TARGET/.organize-deleted/$(basename -- "$LOG" .log)
+	mkdir -p -- "$stage_dir" || return 1
+	base=$(basename -- "$src")
+	stage_file=$stage_dir/$base
+	while [[ -e $stage_file ]]; do
+		n=$((n + 1))
+		stage_file=$stage_dir/$base.$n
+	done
+	log_move "$src" "$stage_file"
+	MOVES_STARTED=1
+	mv -- "$src" "$stage_file" || return 1
+}
+
 trash_file() {
 	local src=$1 data_home tdir base dest info ts
 	data_home=${XDG_DATA_HOME:-${HOME:?}/.local/share}
@@ -1694,6 +2258,8 @@ trash_file() {
 	info=$tdir/info/$base.trashinfo
 	ts=$(date +%Y-%m-%dT%H:%M:%S)
 	printf '[Trash Info]\nPath=%s\nDeletionDate=%s\n' "$(percent_encode "$src")" "$ts" >"$info"
+	log_move "$src" "$dest"
+	MOVES_STARTED=1
 	mv -- "$src" "$dest"
 }
 
@@ -1801,8 +2367,9 @@ handle_duplicate() {
 		DUP_DELETED=$((DUP_DELETED + 1))
 		if [[ $DRY_RUN -eq 1 ]]; then
 			printf 'would delete duplicate: %s (matches %s)\n' "$src" "$match"
+			record_plan D "$src" ""
 		else
-			rm -f -- "$src"
+			stage_deleted "$src" || die "cannot stage duplicate for deletion: $src"
 			printf 'deleted duplicate: %s (matches %s)\n' "$src" "$match"
 		fi
 		;;
@@ -1814,6 +2381,7 @@ handle_duplicate() {
 		DUP_TRASHED=$((DUP_TRASHED + 1))
 		if [[ $DRY_RUN -eq 1 ]]; then
 			printf 'would trash duplicate: %s (matches %s)\n' "$src" "$match"
+			record_plan T "$src" ""
 		else
 			trash_file "$src"
 			printf 'trashed duplicate: %s (matches %s)\n' "$src" "$match"
@@ -2096,6 +2664,28 @@ menu_main() {
 	done
 }
 
+if ((WATCH)); then
+	watch_loop
+	exit 0
+fi
+
+if [[ -n $APPLY_PLAN ]]; then
+	apply_plan_file "$APPLY_PLAN"
+	print_summary
+	exit 0
+fi
+
+if [[ $CONFIRM -eq 1 ]]; then
+	[[ -t 0 ]] || die "--confirm requires an interactive terminal"
+	command -v whiptail >/dev/null 2>&1 || die "whiptail is required for --confirm"
+	DRY_RUN=1
+	PLAN_TEMP=$(mktemp "${TMPDIR:-/tmp}/organize-plan-XXXXXX") || die "cannot create plan file"
+	: >"$PLAN_TEMP"
+	PLAN_FILE=$PLAN_TEMP
+elif [[ -n $PLAN_FILE ]]; then
+	: >"$PLAN_FILE" || die "cannot write plan file: $PLAN_FILE"
+fi
+
 if [[ $UNDO -eq 1 ]]; then
 	acquire_lock
 	undo_last
@@ -2146,6 +2736,7 @@ should_skip() {
 	[[ $src -ef $SCRIPT_PATH ]] && return 0
 	[[ -n $RULES_PATH && $src -ef $RULES_PATH ]] && return 0
 	[[ $name == .organize-log-*.log ]] && return 0
+	[[ $src == "$TARGET"/.organize-deleted/* ]] && return 0
 	[[ $INCLUDE_HIDDEN -eq 0 ]] && is_hidden_name "$name" && return 0
 	if ((${#EXCLUDE_PATTERNS[@]} > 0)) && match_any_glob "$name" "${EXCLUDE_PATTERNS[@]}"; then
 		return 0
@@ -2154,6 +2745,25 @@ should_skip() {
 		return 0
 	fi
 	return 1
+}
+
+preflight_space() {
+	local total=0 f dev_src dev_dst avail size
+	[[ $DRY_RUN -eq 1 ]] && return 0
+	dev_src=$(stat -c %d "$DIR" 2>/dev/null || stat -f %d "$DIR" 2>/dev/null || true)
+	dev_dst=$(stat -c %d "$TARGET" 2>/dev/null || stat -f %d "$TARGET" 2>/dev/null || true)
+	[[ -n $dev_src && -n $dev_dst && $dev_src == "$dev_dst" ]] && return 0
+	for f in "${files[@]}"; do
+		[[ -e $f ]] || continue
+		size=$(file_size "$f" 2>/dev/null || printf 0)
+		total=$((total + size))
+	done
+	((total == 0)) && return 0
+	avail=$(df -Pk "$TARGET" 2>/dev/null | awk 'NR == 2 { print $4 }') || return 0
+	[[ $avail =~ ^[0-9]+$ ]] || return 0
+	if ((total / 1024 + 1024 > avail)); then
+		die "not enough free space on $TARGET: need about $((total / 1048576)) MiB, have $((avail / 1024)) MiB"
+	fi
 }
 
 files=()
@@ -2171,13 +2781,14 @@ if [[ $RECURSIVE -eq 1 ]]; then
 		add_prune -path "$TARGET"
 	fi
 	for cat in "${CATEGORIES[@]}"; do
-		# Smart mode no longer owns these names: images/documents go to XDG
-		# user dirs and series live at the target root, so scan them normally.
-		if [[ $SMART_MODE -eq 1 && ($cat == Images || $cat == Documents || $cat == Videos) ]]; then
+		# Reorganize and smart modes need to look inside the folders they own.
+		if [[ $REORGANIZE -eq 1 ]] ||
+			[[ $SMART_MODE -eq 1 && ($cat == Images || $cat == Documents || $cat == Videos) ]]; then
 			continue
 		fi
 		add_prune -path "$TARGET/$cat"
 	done
+	add_prune -path "$TARGET/.organize-deleted"
 	# Never descend into hidden directories when hidden files are excluded.
 	if [[ $INCLUDE_HIDDEN -eq 0 ]]; then
 		add_prune -name '.*'
@@ -2196,6 +2807,8 @@ else
 	done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 fi
 
+preflight_space
+
 if [[ $SMART_MODE -eq 1 ]]; then
 	smart_organize
 elif ((${#files[@]} > 0)); then
@@ -2206,18 +2819,21 @@ elif ((${#files[@]} > 0)); then
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
 
 		structured=0
+		MOVE_REASON=""
 		if cat=$(rule_for "$base"); then
-			:
+			MOVE_REASON="custom rule"
 		elif cat=$(custom_category_for "$ext"); then
-			:
+			MOVE_REASON="custom category $cat"
 		else
 			cat=$(category_for "$ext")
+			MOVE_REASON="extension .${ext:-none}"
 			if [[ $cat == Videos ]]; then
 				# Videos are never dumped into a generic folder: recognized
 				# episodes are organized, everything else stays in place.
 				if [[ $TV_MODE -eq 1 ]]; then
 					if tv_cat=$(tv_category "$src"); then
 						cat=$tv_cat
+						MOVE_REASON="TV episode"
 						structured=1
 					else
 						printf 'left in place (unidentified video): %s\n' "$src"
@@ -2225,6 +2841,7 @@ elif ((${#files[@]} > 0)); then
 					fi
 				elif detect_episode "$src"; then
 					cat=$(series_rel "$SMART_SHOW" "$SMART_SEASON")
+					MOVE_REASON="TV episode: $SMART_SHOW season $SMART_SEASON"
 					structured=1
 				else
 					printf 'left in place (unidentified video): %s\n' "$src"
@@ -2232,6 +2849,7 @@ elif ((${#files[@]} > 0)); then
 				fi
 			elif [[ $MUSIC_MODE -eq 1 && $cat == Audio ]] && music_cat=$(music_category "$src"); then
 				cat=$music_cat
+				MOVE_REASON="music tags: $music_cat"
 				structured=1
 			fi
 		fi
@@ -2240,6 +2858,7 @@ elif ((${#files[@]} > 0)); then
 			date_dir=$(date_path "$src" "$cat" 2>/dev/null || true)
 			if [[ -n $date_dir ]]; then
 				cat=$cat/$date_dir
+				MOVE_REASON+="; date $date_dir"
 			fi
 		fi
 
@@ -2257,6 +2876,16 @@ elif ((${#files[@]} > 0)); then
 			SEEN_HASH["$CUR_SIZE:$CUR_HASH"]=${LAST_DEST:-$src}
 		fi
 	done
+fi
+
+if [[ $TV_MODE -eq 1 ]]; then
+	merge_variant_dirs "$TARGET/Videos"
+else
+	merge_variant_dirs "$TARGET"
+fi
+
+if ((REORGANIZE)); then
+	prune_empty_source_dirs
 fi
 
 if [[ $MOVE_FOLDERS -eq 1 && $RECURSIVE -eq 0 ]]; then
@@ -2277,3 +2906,8 @@ if [[ -n $LOG ]]; then
 fi
 
 print_summary
+purge_stale_delete_backups
+
+if [[ $CONFIRM -eq 1 && -n $PLAN_TEMP ]]; then
+	confirm_and_apply_plan "$PLAN_TEMP"
+fi
