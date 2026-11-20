@@ -89,6 +89,7 @@ INCLUDE_PATTERNS=()
 EXCLUDE_PATTERNS=()
 CONFIG_ARGS=()
 declare -A SIZE_INDEX=()
+declare -A FILE_SIZES=()
 declare -A ALIASES=()
 declare -A HASH_CACHE=()
 declare -A SEEN_HASH=()
@@ -96,6 +97,10 @@ declare -A COUNT_BY_CAT=()
 declare -A SIZE_BY_CAT=()
 declare -A SMART_DEST=()
 UNDO_LOGS=()
+CATEGORY_RESULT=""
+RULE_RESULT=""
+UNIQUE_RESULT=""
+FILE_SIZE_RESULT=0
 
 SMART_SHOW=""
 SMART_SEASON=""
@@ -819,9 +824,14 @@ apply_plan_file() {
 		fi
 		case $type in
 		M)
-			mkdir -p -- "$(dirname -- "$dest")" || return 1
-			final=$(unique_path "$dest" 0)
-			size=$(file_size "$src" 2>/dev/null || printf 0)
+			mkdir -p -- "${dest%/*}" || return 1
+			unique_path "$dest" 0
+			final=$UNIQUE_RESULT
+			if file_size "$src" 2>/dev/null; then
+				size=$FILE_SIZE_RESULT
+			else
+				size=0
+			fi
 			log_move "$src" "$final"
 			MOVES_STARTED=1
 			mv -- "$src" "$final" || return 1
@@ -1002,7 +1012,7 @@ purge_stale_delete_backups() {
 	done
 	[[ -n $latest ]] || latest="none"
 	for d in "$TARGET"/.organize-deleted/.organize-log-*; do
-		name=$(basename -- "$d")
+		name=${d##*/}
 		[[ $DIR/$name.log == "$latest" ]] && continue
 		rm -rf -- "$d"
 	done
@@ -1025,7 +1035,7 @@ restore_entries() {
 			remove_empty_parents "$dest" "$log_target"
 			continue
 		fi
-		mkdir -p -- "$(dirname -- "$src")"
+		mkdir -p -- "${src%/*}"
 		if [[ -L $src && $src -ef $dest ]]; then
 			rm -f -- "$src"
 		elif [[ -e $src ]]; then
@@ -1039,7 +1049,7 @@ restore_entries() {
 			continue
 		fi
 		if [[ $dest == */Trash/files/* ]]; then
-			rm -f -- "${dest%/files/*}/info/$(basename -- "$dest").trashinfo"
+			rm -f -- "${dest%/files/*}/info/${dest##*/}.trashinfo"
 		fi
 		remove_empty_parents "$dest" "$log_target"
 		printf 'restored: %s\n' "$src"
@@ -1151,47 +1161,48 @@ on_exit() {
 # directory that was used as the target.
 remove_empty_parents() {
 	local dir=$1 stop=$2
-	dir=$(dirname -- "$dir")
+	dir=${dir%/*}
 	while [[ $dir == "$stop"/* ]]; do
 		rmdir -- "$dir" 2>/dev/null || break
-		dir=$(dirname -- "$dir")
+		dir=${dir%/*}
 	done
 }
 
 category_for() {
-	local ext
-	ext=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+	local ext=$1
+	[[ $ext == *[A-Z]* ]] && ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
 
+	CATEGORY_RESULT=Other
 	case "$ext" in
 	jpg | jpeg | png | gif | bmp | tiff | tif | webp | svg | heic | heif | avif | raw | cr2 | nef | dng)
-		echo Images
+		CATEGORY_RESULT=Images
 		;;
 	pdf | doc | docx | txt | rtf | odt | md | markdown | xls | xlsx | ods | ppt | pptx | odp | csv | epub)
-		echo Documents
+		CATEGORY_RESULT=Documents
 		;;
 	mp4 | mkv | avi | mov | wmv | flv | webm | m4v | mpg | mpeg | 3gp | ogv)
-		echo Videos
+		CATEGORY_RESULT=Videos
 		;;
 	mp3 | wav | flac | aac | ogg | m4a | wma | opus | mid | midi)
-		echo Audio
+		CATEGORY_RESULT=Audio
 		;;
 	zip | tar | gz | bz2 | xz | 7z | rar | tgz | tbz2 | txz | zst)
-		echo Archives
+		CATEGORY_RESULT=Archives
 		;;
 	iso | img | dmg)
 		echo "Disk Images"
 		;;
 	sh | bash | zsh | fish | py | js | jsx | ts | tsx | json | yaml | yml | toml | xml | html | htm | css | scss | sass | less | php | rb | go | rs | java | c | h | cpp | hpp | cs | swift | kt | kts | sql | lua | pl | r | m | mm | gradle)
-		echo Code
+		CATEGORY_RESULT=Code
 		;;
 	ttf | otf | woff | woff2)
-		echo Fonts
+		CATEGORY_RESULT=Fonts
 		;;
 	exe | msi | deb | rpm | appimage | apk | flatpak | snap)
-		echo Executables
+		CATEGORY_RESULT=Executables
 		;;
 	*)
-		echo Other
+		CATEGORY_RESULT=Other
 		;;
 	esac
 }
@@ -1214,7 +1225,7 @@ tv_category() {
 	local base show season
 	local re_sxx re_nxn re_season_ep re_season re_s
 
-	base=$(basename -- "$1")
+	base=${1##*/}
 	re_sxx='^(.+)[._ -]+[sS]([0-9]{1,2})[._ ]*[eE][0-9]{1,3}'
 	re_nxn='^(.+)[._ -]+([0-9]{1,2})[xX]([0-9]{1,3})'
 	re_season_ep='^(.+)[._ -]+[sS]eason[._ -]*([0-9]{1,2})[._ -]*[eE]pisode[._ -]*[0-9]{1,3}'
@@ -1273,7 +1284,7 @@ music_category() {
 		album=$(exiftool -s3 -Album "$src" 2>/dev/null || true)
 	fi
 
-	base=$(basename -- "$src")
+	base=${src##*/}
 	if [[ -z $artist || -z $album ]] && [[ $base =~ $re ]]; then
 		[[ -z $artist ]] && artist=${BASH_REMATCH[1]}
 		[[ -z $album ]] && album=${BASH_REMATCH[2]}
@@ -1293,8 +1304,8 @@ music_category() {
 unique_path() {
 	local dest=$1 is_dir=${2:-0}
 	local dir base name ext i=1
-	dir=$(dirname -- "$dest")
-	name=$(basename -- "$dest")
+	dir=${dest%/*}
+	name=${dest##*/}
 	dest=$dir/$name
 
 	if [[ $is_dir -eq 0 && $name != .* && $name == *.* ]]; then
@@ -1309,7 +1320,7 @@ unique_path() {
 		dest=$dir/$base" ($i)"$ext
 		i=$((i + 1))
 	done
-	printf '%s\n' "$dest"
+	UNIQUE_RESULT=$dest
 }
 
 rename_basename() {
@@ -1514,7 +1525,7 @@ detect_episode() {
 	local re_anc_series='^(.+)[._ -]+[sS]eries[._ -]*([0-9]{1,2})$'
 	local bare_numeric=0
 
-	base=$(basename -- "$src")
+	base=${src##*/}
 	base=${base%.*}
 
 	re_sxx='^(.+)[._ -]+[sS]([0-9]{1,2})[._ -]*[eE]([0-9]{1,3})([^0-9]|$)'
@@ -1562,9 +1573,9 @@ detect_episode() {
 	fi
 
 	# Walk up the folder tree for missing show/season context.
-	cur=$(dirname -- "$src")
+	cur=${src%/*}
 	while [[ $cur == "$DIR"/* ]]; do
-		name=$(basename -- "$cur")
+		name=${cur##*/}
 		if [[ -z $season ]] && season=$(season_from_folder "$name"); then
 			:
 		fi
@@ -1577,13 +1588,13 @@ detect_episode() {
 			[[ -z $season ]] && season=$((10#${BASH_REMATCH[2]}))
 		fi
 		if [[ -n $season && -z $show ]]; then
-			parent=$(dirname -- "$cur")
+			parent=${cur%/*}
 			if [[ $parent != "$DIR" ]]; then
-				show=$(basename -- "$parent")
+				show=${parent##*/}
 			fi
 		fi
 		[[ -n $show && -n $season ]] && break
-		cur=$(dirname -- "$cur")
+		cur=${cur%/*}
 	done
 
 	show=$(smart_show_name "$show")
@@ -1604,7 +1615,7 @@ detect_movie() {
 	local re_year='^(19|20)[0-9]{2}$'
 	local re_ep_marker='[._ -][eE][pP]?[._ -]?[0-9]{1,4}([._ -]|$)'
 
-	base=$(basename -- "$src")
+	base=${src##*/}
 	base=${base%.*}
 
 	# Bare episode markers are not movies.
@@ -1724,7 +1735,7 @@ assoc_key() {
 # likely to belong to the video in the same folder.
 is_sidecar_file() {
 	local base ext stem
-	base=$(basename -- "$1")
+	base=${1##*/}
 	ext=""
 	[[ $base != .* && $base == *.* ]] && ext=${base##*.}
 	ext=${ext,,}
@@ -1755,7 +1766,8 @@ dir_has_video() {
 	while IFS= read -r -d '' f; do
 		ext=${f##*.}
 		ext=${ext,,}
-		[[ $(category_for "$ext") == Videos ]] && return 0
+		category_for "$ext"
+		[[ $CATEGORY_RESULT == Videos ]] && return 0
 	done < <(find "$d" -maxdepth 3 -type f -print0 2>/dev/null)
 	return 1
 }
@@ -1827,8 +1839,8 @@ movie_rel() {
 }
 
 document_type_dir() {
-	local ext
-	ext=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+	local ext=$1
+	[[ $ext == *[A-Z]* ]] && ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
 	case $ext in
 	pdf) echo PDF ;;
 	doc | docx | odt | rtf | txt | md | markdown | pages) echo Text ;;
@@ -1898,14 +1910,14 @@ is_generic_context_name() {
 # meaningful ancestor exists.
 context_for() {
 	local src=$1 cur name
-	cur=$(dirname -- "$src")
+	cur=${src%/*}
 	while [[ $cur == "$DIR"/* ]]; do
-		name=$(basename -- "$cur")
+		name=${cur##*/}
 		if ! is_generic_context_name "$name"; then
 			printf '%s' "$name"
 			return 0
 		fi
-		cur=$(dirname -- "$cur")
+		cur=${cur%/*}
 	done
 	return 0
 }
@@ -1915,7 +1927,7 @@ context_for() {
 # a "name (1)" copy.
 smart_move() {
 	local src=$1 dest_dir=$2 label=${3:-} name dest
-	name=$(basename -- "$src")
+	name=${src##*/}
 	if [[ $RENAME -eq 1 && ! -d $src ]]; then
 		name=$(rename_basename "$name")
 	fi
@@ -1966,15 +1978,16 @@ smart_organize() {
 	# which one is encountered first.
 	for src in "${files[@]}"; do
 		[[ -e $src || -L $src ]] || continue
-		base=$(basename -- "$src")
+		base=${src##*/}
 		ext=""
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
-		[[ $(category_for "$ext") == Videos ]] || continue
+		category_for "$ext"
+		[[ $CATEGORY_RESULT == Videos ]] || continue
 		# Explicit rules and custom categories always win over smart detection.
-		if rule_for "$src" >/dev/null; then
+		if rule_for "$src"; then
 			continue
 		fi
-		if custom_category_for "$ext" >/dev/null; then
+		if custom_category_for "$ext"; then
 			continue
 		fi
 
@@ -1986,7 +1999,7 @@ smart_organize() {
 			continue
 		fi
 		SMART_DEST[$src]=$rel
-		d=$(dirname -- "$src")
+		d=${src%/*}
 		key=$(assoc_key "$base")
 		# Key sidecar associations by source directory so identical stems in
 		# different seasons can never cross-match.
@@ -2002,15 +2015,16 @@ smart_organize() {
 	# Pass 2: move everything.
 	for src in "${files[@]}"; do
 		[[ -e $src || -L $src ]] || continue
-		base=$(basename -- "$src")
+		base=${src##*/}
 		ext=""
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
 
-		d=$(dirname -- "$src")
+		d=${src%/*}
 		abs_dir=""
 		label=""
 		MOVE_REASON=""
-		if cat=$(rule_for "$src"); then
+		if rule_for "$src"; then
+			cat=$RULE_RESULT
 			rel=$cat
 			label=${cat%%/*}
 			MOVE_REASON="custom rule"
@@ -2041,10 +2055,11 @@ smart_organize() {
 					printf 'left in place (no matching video for sidecar): %s\n' "$src"
 					continue
 				fi
-				if cc=$(custom_category_for "$ext"); then
-					cat=$cc
+				if custom_category_for "$ext"; then
+					cat=$CATEGORY_RESULT
 				else
-					cat=$(category_for "$ext")
+					category_for "$ext"
+					cat=$CATEGORY_RESULT
 				fi
 				case $cat in
 				Videos)
@@ -2119,7 +2134,7 @@ move_one() {
 	else
 		dest_dir=$TARGET/$cat
 	fi
-	name=$(basename -- "$src")
+	name=${src##*/}
 	if [[ $RENAME -eq 1 && $is_dir -eq 0 ]]; then
 		name=$(rename_basename "$name")
 	fi
@@ -2129,7 +2144,8 @@ move_one() {
 		MOVE_REASON=""
 		return 0
 	fi
-	dest=$(unique_path "$natural" "$is_dir")
+	unique_path "$natural" "$is_dir"
+	dest=$UNIQUE_RESULT
 	LAST_DEST=$dest
 
 	if [[ $EXPLAIN -eq 1 && $JSON -eq 0 ]]; then
@@ -2142,7 +2158,11 @@ move_one() {
 	MOVE_REASON=""
 
 	if [[ $is_dir -eq 0 ]]; then
-		size=$(file_size "$src" 2>/dev/null || printf 0)
+		if file_size "$src" 2>/dev/null; then
+			size=$FILE_SIZE_RESULT
+		else
+			size=0
+		fi
 	fi
 
 	if [[ $DRY_RUN -eq 1 ]]; then
@@ -2237,6 +2257,7 @@ load_rules() {
 			fi
 			add_managed_dir "$cat_name"
 			cat_exts=${cat_exts//,/ }
+			cat_exts=$(printf '%s' "$cat_exts" | tr '[:upper:]' '[:lower:]')
 			# shellcheck disable=SC2206 # word splitting is intentional
 			ext_arr=($cat_exts)
 			((${#ext_arr[@]} > 0)) || die "rules: $file:$lineno: empty extension list"
@@ -2348,7 +2369,13 @@ rule_conditions_met() {
 			return 1
 		fi
 		if [[ $field == size ]]; then
-			[[ -n $size ]] || size=$(file_size "$src" 2>/dev/null || printf '0')
+			if [[ -z $size ]]; then
+				if file_size "$src" 2>/dev/null; then
+					size=$FILE_SIZE_RESULT
+				else
+					size=0
+				fi
+			fi
 			[[ $size =~ ^[0-9]+$ ]] || return 1
 			val=$(parse_size "$val") || return 1
 			compare_number "$op" "$size" "$val" || return 1
@@ -2390,10 +2417,10 @@ expand_rule_dest() {
 
 rule_for() {
 	local src=$1 base ext i
-	base=$(basename -- "$src")
+	base=${src##*/}
 	ext=""
 	[[ $base != .* && $base == *.* ]] && ext=${base##*.}
-	ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+	[[ $ext == *[A-Z]* ]] && ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
 	((${#RULE_PATTERNS[@]} > 0)) || return 1
 
 	shopt -s nocasematch
@@ -2403,7 +2430,7 @@ rule_for() {
 			if [[ -n ${RULE_CONDS[i]} ]] && ! rule_conditions_met "${RULE_CONDS[i]}" "$src"; then
 				continue
 			fi
-			expand_rule_dest "${RULE_DESTS[i]}" "$src" "$ext"
+			RULE_RESULT=$(expand_rule_dest "${RULE_DESTS[i]}" "$src" "$ext")
 			shopt -u nocasematch
 			return 0
 		fi
@@ -2416,11 +2443,11 @@ rule_for() {
 custom_category_for() {
 	local ext=$1 i e
 	((${#CAT_EXT_NAMES[@]} > 0)) || return 1
-	ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+	[[ $ext == *[A-Z]* ]] && ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
 	for ((i = 0; i < ${#CAT_EXT_NAMES[@]}; i++)); do
 		for e in ${CAT_EXT_LISTS[i]}; do
-			if [[ $(printf '%s' "$e" | tr '[:upper:]' '[:lower:]') == "$ext" ]]; then
-				printf '%s\n' "${CAT_EXT_NAMES[i]}"
+			if [[ $e == "$ext" ]]; then
+				CATEGORY_RESULT=${CAT_EXT_NAMES[i]}
 				return 0
 			fi
 		done
@@ -2448,7 +2475,8 @@ match_any_glob() {
 file_filters_skip() {
 	local src=$1 size mtime now
 	if [[ -n $MIN_SIZE || -n $MAX_SIZE ]]; then
-		size=$(file_size "$src" 2>/dev/null) || return 1
+		file_size "$src" 2>/dev/null || return 1
+		size=$FILE_SIZE_RESULT
 		[[ -n $MIN_SIZE && $size -lt $MIN_SIZE ]] && return 0
 		[[ -n $MAX_SIZE && $size -gt $MAX_SIZE ]] && return 0
 	fi
@@ -2464,11 +2492,12 @@ file_filters_skip() {
 }
 
 stage_deleted() {
-	local src=$1 stage_dir stage_file base n=0
+	local src=$1 stage_dir stage_name stage_file base n=0
 	ensure_log || return 1
-	stage_dir=$TARGET/.organize-deleted/$(basename -- "$LOG" .log)
+	stage_name=${LOG##*/}
+	stage_dir=$TARGET/.organize-deleted/${stage_name%.log}
 	mkdir -p -- "$stage_dir" || return 1
-	base=$(basename -- "$src")
+	base=${src##*/}
 	stage_file=$stage_dir/$base
 	while [[ -e $stage_file ]]; do
 		n=$((n + 1))
@@ -2484,8 +2513,9 @@ trash_file() {
 	data_home=${XDG_DATA_HOME:-${HOME:?}/.local/share}
 	tdir=$data_home/Trash
 	mkdir -p -- "$tdir/files" "$tdir/info" || die "cannot create trash directory: $tdir"
-	dest=$(unique_path "$tdir/files/$(basename -- "$src")")
-	base=$(basename -- "$dest")
+	unique_path "$tdir/files/${src##*/}"
+	dest=$UNIQUE_RESULT
+	base=${dest##*/}
 	info=$tdir/info/$base.trashinfo
 	ts=$(date +%Y-%m-%dT%H:%M:%S)
 	printf '[Trash Info]\nPath=%s\nDeletionDate=%s\n' "$(percent_encode "$src")" "$ts" >"$info"
@@ -2522,7 +2552,14 @@ date_path() {
 }
 
 file_size() {
-	stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null
+	local out
+	if [[ -n ${FILE_SIZES[$1]:-} ]]; then
+		FILE_SIZE_RESULT=${FILE_SIZES[$1]}
+		return 0
+	fi
+	out=$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null) || return 1
+	FILE_SIZE_RESULT=$out
+	FILE_SIZES[$1]=$out
 }
 
 file_hash() {
@@ -2547,7 +2584,8 @@ build_dedupe_index() {
 	for d in "${CATEGORIES[@]}"; do
 		[[ -d $TARGET/$d ]] || continue
 		while IFS= read -r -d '' f; do
-			size=$(file_size "$f" 2>/dev/null) || continue
+			file_size "$f" 2>/dev/null || continue
+			size=$FILE_SIZE_RESULT
 			SIZE_INDEX["$size"]+="$f"$'\n'
 		done < <(find "$TARGET/$d" -type f -print0 2>/dev/null)
 	done
@@ -2557,7 +2595,8 @@ build_dedupe_index() {
 # in this run. Must be called directly so the counters persist.
 find_duplicate() {
 	local src=$1 size h key candidates cand ch
-	size=$(file_size "$src") || return 1
+	file_size "$src" || return 1
+	size=$FILE_SIZE_RESULT
 	h=$(file_hash "$src")
 	CUR_SIZE=$size
 	CUR_HASH=$h
@@ -2971,7 +3010,7 @@ fi
 
 should_skip() {
 	local src=$1 name
-	name=$(basename -- "$src")
+	name=${src##*/}
 	[[ $src -ef $SCRIPT_PATH ]] && return 0
 	[[ -n $RULES_PATH && $src -ef $RULES_PATH ]] && return 0
 	[[ $name == .organize-log-*.log ]] && return 0
@@ -2995,7 +3034,11 @@ preflight_space() {
 	[[ -n $dev_src && -n $dev_dst && $dev_src == "$dev_dst" ]] && return 0
 	for f in "${files[@]}"; do
 		[[ -e $f ]] || continue
-		size=$(file_size "$f" 2>/dev/null || printf 0)
+		if file_size "$f" 2>/dev/null; then
+			size=$FILE_SIZE_RESULT
+		else
+			size=0
+		fi
 		total=$((total + size))
 	done
 	((total == 0)) && return 0
@@ -3007,6 +3050,19 @@ preflight_space() {
 }
 
 files=()
+
+add_file() {
+	local src=$1 size=${2:-}
+	[[ -n $size ]] && FILE_SIZES[$src]=$size
+	should_skip "$src" && return 0
+	file_filters_skip "$src" && return 0
+	files+=("$src")
+}
+
+FIND_PRINTF=0
+if find . -maxdepth 0 -printf '' >/dev/null 2>&1; then
+	FIND_PRINTF=1
+fi
 
 if [[ $RECURSIVE -eq 1 ]]; then
 	prune=()
@@ -3034,17 +3090,25 @@ if [[ $RECURSIVE -eq 1 ]]; then
 		add_prune -name '.*'
 	fi
 
-	while IFS= read -r -d '' src; do
-		should_skip "$src" && continue
-		file_filters_skip "$src" && continue
-		files+=("$src")
-	done < <(find "$DIR" -mindepth 1 \( "${prune[@]}" \) -prune -o \( -type f -o -type l \) -print0 2>/dev/null)
+	if ((FIND_PRINTF)); then
+		while IFS= read -r -d '' size && IFS= read -r -d '' src; do
+			add_file "$src" "$size"
+		done < <(find "$DIR" -mindepth 1 \( "${prune[@]}" \) -prune -o \( -type f -o -type l \) -printf '%s\0%p\0' 2>/dev/null)
+	else
+		while IFS= read -r -d '' src; do
+			add_file "$src"
+		done < <(find "$DIR" -mindepth 1 \( "${prune[@]}" \) -prune -o \( -type f -o -type l \) -print0 2>/dev/null)
+	fi
 else
-	while IFS= read -r -d '' src; do
-		should_skip "$src" && continue
-		file_filters_skip "$src" && continue
-		files+=("$src")
-	done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
+	if ((FIND_PRINTF)); then
+		while IFS= read -r -d '' size && IFS= read -r -d '' src; do
+			add_file "$src" "$size"
+		done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -printf '%s\0%p\0' 2>/dev/null)
+	else
+		while IFS= read -r -d '' src; do
+			add_file "$src"
+		done < <(find "$DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
+	fi
 fi
 
 preflight_space
@@ -3054,18 +3118,21 @@ if [[ $SMART_MODE -eq 1 ]]; then
 elif ((${#files[@]} > 0)); then
 	for src in "${files[@]}"; do
 		[[ -e $src || -L $src ]] || continue
-		base=$(basename -- "$src")
+		base=${src##*/}
 		ext=""
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
 
 		structured=0
 		MOVE_REASON=""
-		if cat=$(rule_for "$src"); then
+		if rule_for "$src"; then
+			cat=$RULE_RESULT
 			MOVE_REASON="custom rule"
-		elif cat=$(custom_category_for "$ext"); then
+		elif custom_category_for "$ext"; then
+			cat=$CATEGORY_RESULT
 			MOVE_REASON="custom category $cat"
 		else
-			cat=$(category_for "$ext")
+			category_for "$ext"
+			cat=$CATEGORY_RESULT
 			MOVE_REASON="extension .${ext:-none}"
 			if [[ $cat == Videos ]]; then
 				# Videos are never dumped into a generic folder: recognized

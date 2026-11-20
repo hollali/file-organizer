@@ -8,10 +8,10 @@ FISHCOMPDIR ?= $(PREFIX)/share/fish/vendor_completions.d
 BASH ?= bash
 VERSION ?= $(shell sed -n 's/^VERSION="\(.*\)"/\1/p' organize.sh)
 
-.PHONY: all install uninstall test fuzz lint check deb
+.PHONY: all install uninstall test fuzz bench lint check deb
 
 all:
-	@echo "Targets: install uninstall test fuzz lint check deb"
+	@echo "Targets: install uninstall test fuzz bench lint check deb"
 
 install:
 	install -Dm755 organize.sh "$(DESTDIR)$(BINDIR)/organize"
@@ -36,6 +36,9 @@ test:
 
 fuzz:
 	$(BASH) tests/fuzz.sh
+
+bench:
+	$(BASH) tests/bench.sh $(COUNT)
 
 lint:
 	$(BASH) -n organize.sh
