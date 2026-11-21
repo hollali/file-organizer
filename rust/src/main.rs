@@ -31,6 +31,8 @@ struct Args {
     by_date: bool,
     #[arg(long = "rename")]
     rename: bool,
+    #[arg(long = "explain")]
+    explain: bool,
     #[arg(long = "json")]
     json: bool,
     #[arg(long = "undo")]
@@ -389,8 +391,7 @@ fn run_once(args: &Args) {
                     let days = secs / 86400;
                     // approximate year/month using civil date algorithm
                     let (y, m, _d) = civil_from_days(days as i64);
-                    cat = format!("{}/{} /{}", cat, y, format!("{:02}", m));
-                    cat = cat.replace(" /", "/");
+                    cat = format!("{}/{}/{}", cat, y, format!("{:02}", m));
                 }
             }
         }
@@ -406,8 +407,59 @@ fn run_once(args: &Args) {
         }
         dest = unique_path(&dest);
 
+        let mut explain_reason = String::new();
+        if args.explain {
+            // Determine the explanation based on what category the file landed in
+            let cat_name = cat.split('/').next().unwrap_or(&cat).to_string();
+            let ext_lower = ext.to_lowercase();
+            let is_video = matches!(ext_lower.as_str(), "mp4"|"mkv"|"avi"|"mov"|"wmv"|"flv"|"webm"|"m4v"|"mpg"|"mpeg"|"3gp"|"ogv");
+            let is_image = matches!(ext_lower.as_str(), "jpg"|"jpeg"|"png"|"gif"|"bmp"|"tiff"|"tif"|"webp"|"svg"|"heic"|"heif"|"avif"|"raw"|"cr2"|"nef"|"dng");
+            let is_doc = matches!(ext_lower.as_str(), "pdf"|"doc"|"docx"|"txt"|"rtf"|"odt"|"md"|"markdown");
+            
+            if args.smart {
+                if is_video {
+                    explain_reason = if is_image { "images go to Pictures".to_string() } else { "video files".to_string() };
+                } else if is_image {
+                    explain_reason = "image file".to_string();
+                } else if is_doc {
+                    explain_reason = "document file".to_string();
+                }
+            } else if cat_name == "Videos" && is_video {
+                if let Some((show, season)) = detect_episode(&name) {
+                    explain_reason = format!("TV episode: {} S{:02}", show, season);
+                } else {
+                    explain_reason = "unrecognized video (left in place)".to_string();
+                }
+            } else if cat_name == "Images" && is_image {
+                explain_reason = format!("extension {}", ext);
+            } else if cat_name == "Documents" && is_doc {
+                explain_reason = "extension .pdf".to_string();
+            } else if cat_name == "Audio" {
+                explain_reason = "audio file".to_string();
+            } else if cat_name == "Code" {
+                explain_reason = "code file".to_string();
+            } else if cat_name == "Archives" {
+                explain_reason = "archive file".to_string();
+            } else if cat_name == "Disk Images" {
+                explain_reason = "disk image".to_string();
+            } else if cat_name == "Fonts" {
+                explain_reason = "font file".to_string();
+            } else if cat_name == "Executables" {
+                explain_reason = "executable file".to_string();
+            } else {
+                explain_reason = "miscellaneous file".to_string();
+            }
+        }
+        
         if args.dry_run {
-            println!("would move: {} -> {}", f.display(), dest.display());
+            if args.explain && !explain_reason.is_empty() {
+                println!("why: {} -> {} ({})", f.display(), dest.display(), explain_reason);
+                println!("would move: {} -> {}", f.display(), dest.display());
+            } else if args.explain {
+                println!("would move: {} -> {}", f.display(), dest.display());
+            } else {
+                println!("would move: {} -> {}", f.display(), dest.display());
+            }
         } else {
             fs::create_dir_all(&dest_dir).ok();
             if fs::rename(f, &dest).is_ok() {
