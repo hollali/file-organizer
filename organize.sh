@@ -2220,11 +2220,11 @@ move_one() {
 		fi
 		record_plan M "$src" "$dest"
 		if ((${#PLUGIN_FILES[@]} > 0)) && [[ $DRY_RUN -eq 0 ]]; then
-		if declare -F organize_post_move >/dev/null 2>&1; then
-			organize_post_move "$src" "$dest" || true
+			if declare -F organize_post_move >/dev/null 2>&1; then
+				organize_post_move "$src" "$dest" || true
+			fi
 		fi
-	fi
-	record_move "${label:-$cat}" "$size"
+		record_move "${label:-$cat}" "$size"
 		return
 	fi
 
@@ -3109,8 +3109,10 @@ fi
 
 # Load plugins: explicit --plugin files plus any *.sh in the plugins dir.
 _plugin_dir=""
-if [[ -n ${XDG_CONFIG_HOME:-} ]]; then _plugin_dir=$XDG_CONFIG_HOME/organize/plugins
-elif [[ -n ${HOME:-} ]]; then _plugin_dir=$HOME/.config/organize/plugins
+if [[ -n ${XDG_CONFIG_HOME:-} ]]; then
+	_plugin_dir=$XDG_CONFIG_HOME/organize/plugins
+elif [[ -n ${HOME:-} ]]; then
+	_plugin_dir=$HOME/.config/organize/plugins
 fi
 if [[ -d $_plugin_dir ]]; then
 	shopt -s nullglob
