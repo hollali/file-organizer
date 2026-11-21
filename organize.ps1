@@ -33,9 +33,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$VERSION = "1.3.1"
+$ScriptVersion = "1.3.1"
 
-if ($Version) { Write-Output "organize.ps1 $VERSION"; exit 0 }
+if ($Version) { Write-Output "organize.ps1 $ScriptVersion"; exit 0 }
 if ($Help) {
     Write-Output "Usage: organize.ps1 [options] [directory]"
     Write-Output "  -Recursive          include subdirectories"
@@ -73,7 +73,7 @@ if (-not (Test-Path $Target)) { New-Item -ItemType Directory -Force -Path $Targe
 $Target = (Resolve-Path $Target).Path
 
 if ($Doctor) {
-    Write-Output "organize.ps1 $VERSION - dependency check"
+    Write-Output "organize.ps1 $ScriptVersion - dependency check"
     foreach ($c in @("powershell")) { Write-Output "[OK] $c" }
     exit 0
 }
