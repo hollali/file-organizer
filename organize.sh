@@ -69,6 +69,7 @@ LINK=0
 JSON=0
 RULES_FILE=""
 RULES_PATH=""
+PLUGIN_FILES=()
 TARGET=""
 DIR=""
 MIN_SIZE=""
@@ -181,6 +182,7 @@ Options:
       --rename       Normalize names while moving: lowercase, spaces to underscores
   -l, --link         Leave a symlink at the original path pointing at the new location
       --rules FILE   Load custom rules (default: ~/.config/organize/rules.conf)
+      --plugin FILE  Load a plugin (repeatable; also auto-loads plugins/*.sh)
       --config FILE  Load default flags from FILE (default: ~/.config/organize/config.conf)
       --json         Print the summary as JSON
       --version      Show version and exit
@@ -677,6 +679,11 @@ while (($# > 0)); do
 	--rules)
 		(($# >= 2)) || die "option $1 requires an argument"
 		RULES_FILE=$2
+		shift 2
+		;;
+	--plugin)
+		(($# >= 2)) || die "option $1 requires an argument"
+		PLUGIN_FILES+=("$2")
 		shift 2
 		;;
 	--config)
@@ -2178,6 +2185,16 @@ move_one() {
 	dest=$UNIQUE_RESULT
 	LAST_DEST=$dest
 
+	if ((${#PLUGIN_FILES[@]} > 0)) && [[ $DRY_RUN -eq 0 ]]; then
+		if declare -F organize_pre_move >/dev/null 2>&1; then
+			if ! organize_pre_move "$src" "$dest"; then
+				printf 'skipped by plugin: %s -> %s\n' "$src" "$dest"
+				MOVE_REASON=""
+				return 0
+			fi
+		fi
+	fi
+
 	if [[ $EXPLAIN -eq 1 && $JSON -eq 0 ]]; then
 		if [[ -n $MOVE_REASON ]]; then
 			printf 'why: %s -> %s (%s)\n' "$src" "$dest" "$MOVE_REASON"
@@ -2202,7 +2219,12 @@ move_one() {
 			printf 'would move: %s -> %s\n' "$src" "$dest"
 		fi
 		record_plan M "$src" "$dest"
-		record_move "${label:-$cat}" "$size"
+		if ((${#PLUGIN_FILES[@]} > 0)) && [[ $DRY_RUN -eq 0 ]]; then
+		if declare -F organize_post_move >/dev/null 2>&1; then
+			organize_post_move "$src" "$dest" || true
+		fi
+	fi
+	record_move "${label:-$cat}" "$size"
 		return
 	fi
 
@@ -2215,6 +2237,11 @@ move_one() {
 		printf 'moved: %s -> %s (symlink left)\n' "$src" "$dest"
 	else
 		printf 'moved: %s -> %s\n' "$src" "$dest"
+	fi
+	if ((${#PLUGIN_FILES[@]} > 0)) && [[ $DRY_RUN -eq 0 ]]; then
+		if declare -F organize_post_move >/dev/null 2>&1; then
+			organize_post_move "$src" "$dest" || true
+		fi
 	fi
 	record_move "${label:-$cat}" "$size"
 }
@@ -3078,6 +3105,26 @@ if [[ -n $rules_to_load && -f $rules_to_load ]]; then
 	load_rules "$RULES_PATH"
 elif [[ -n $RULES_FILE ]]; then
 	die "rules file not found: $RULES_FILE"
+fi
+
+# Load plugins: explicit --plugin files plus any *.sh in the plugins dir.
+_plugin_dir=""
+if [[ -n ${XDG_CONFIG_HOME:-} ]]; then _plugin_dir=$XDG_CONFIG_HOME/organize/plugins
+elif [[ -n ${HOME:-} ]]; then _plugin_dir=$HOME/.config/organize/plugins
+fi
+if [[ -d $_plugin_dir ]]; then
+	shopt -s nullglob
+	for _pf in "$_plugin_dir"/*.sh; do
+		PLUGIN_FILES+=("$_pf")
+	done
+	shopt -u nullglob
+fi
+if [[ ${#PLUGIN_FILES[@]} -gt 0 ]]; then
+	for _pf in "${PLUGIN_FILES[@]}"; do
+		[[ -f $_pf ]] || die "plugin not found: $_pf"
+		# shellcheck disable=SC1090
+		source "$_pf"
+	done
 fi
 
 if [[ $SMART_MODE -eq 1 ]]; then

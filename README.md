@@ -353,6 +353,7 @@ changed until step 5.
 | `--rename` | Normalize names while moving: lowercase, spaces to underscores |
 | `-l, --link` | Leave a symlink at the original path pointing at the new location |
 | `--rules FILE` | Load custom rules (default: `~/.config/organize/rules.conf`) |
+| `--plugin FILE` | Load a plugin (repeatable; auto-loads `plugins/*.sh`) |
 | `--config FILE` | Load default flags from a config file |
 | `--json` | Print the summary as JSON |
 | `--schedule TIMES[@DIR]` | Schedule daily cron runs at comma-separated `HH:MM` times |
