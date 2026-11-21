@@ -19,6 +19,10 @@ struct Args {
     target: Option<String>,
     #[arg(short = 'H', long = "hidden")]
     hidden: bool,
+    #[arg(short = 'T', long = "tv")]
+    tv: bool,
+    #[arg(long = "smart")]
+    smart: bool,
     #[arg(long = "by-date")]
     by_date: bool,
     #[arg(long = "rename")]
@@ -122,6 +126,56 @@ fn rename_basename(name: &str) -> String {
 
 fn is_hidden(p: &Path) -> bool {
     p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(false)
+}
+
+fn detect_episode(name: &str) -> Option<(String, u32)> {
+    // returns (show, season) for common patterns
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let base = base.rsplit('.').next().map(|_| base).unwrap_or(base); // keep ext? we strip below
+    let stem = if let Some(i) = base.rfind('.') { &base[..i] } else { base };
+    // patterns: Show.S01E02, Show.1x03, Show Season 01 Episode 02
+    // Use simple regex-like manual parsing via splitting
+    // Try S season E episode
+    for (i, c) in stem.char_indices() {
+        if (c == 'S' || c == 's') && i + 3 < stem.len() {
+            let rest = &stem[i+1..];
+            if let Some(e) = rest.find(|ch: char| ch == 'E' || ch == 'e') {
+                if e >= 1 && e <= 2 {
+                    let season_str = &rest[..e];
+                    if season_str.chars().all(|ch| ch.is_ascii_digit()) {
+                        let show = stem[..i].trim_matches(|ch: char| ch == '.' || ch == '_' || ch == '-' || ch == ' ');
+                        if !show.is_empty() {
+                            if let Ok(season) = season_str.parse::<u32>() {
+                                return Some((show.to_string(), season));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // N x M
+    // find 'x' or 'X' with digits around
+    for (i, c) in stem.char_indices() {
+        if c == 'x' || c == 'X' {
+            if i > 0 && i + 1 < stem.len() {
+                let left = &stem[..i];
+                let right = &stem[i+1..];
+                let ltrim: String = left.chars().rev().take_while(|ch| ch.is_ascii_digit()).collect::<String>().chars().rev().collect();
+                let rtrim: String = right.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                if !ltrim.is_empty() && !rtrim.is_empty() {
+                    if let (Ok(season), Ok(_ep)) = (ltrim.parse::<u32>(), rtrim.parse::<u32>()) {
+                        let show_part = &left[..left.len()-ltrim.len()];
+                        let show = show_part.trim_matches(|ch: char| ch == '.' || ch == '_' || ch == '-' || ch == ' ');
+                        if !show.is_empty() {
+                            return Some((show.to_string(), season));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn main() {
@@ -256,7 +310,30 @@ fn main() {
                 break;
             }
         }
-        let mut cat = cat.unwrap_or_else(|| category_for(&ext).to_string());
+        let is_video = matches!(ext.to_lowercase().as_str(), "mp4"|"mkv"|"avi"|"mov"|"wmv"|"flv"|"webm"|"m4v"|"mpg"|"mpeg"|"3gp"|"ogv");
+    let is_image = matches!(ext.to_lowercase().as_str(), "jpg"|"jpeg"|"png"|"gif"|"bmp"|"tiff"|"tif"|"webp"|"svg"|"heic"|"heif"|"avif"|"raw");
+    let is_doc = matches!(ext.to_lowercase().as_str(), "pdf"|"doc"|"docx"|"txt"|"rtf"|"odt"|"md"|"markdown");
+    if args.tv && is_video && detect_episode(&name).is_none() {
+        continue;
+    }
+    let mut cat = cat.unwrap_or_else(|| {
+        if args.smart {
+            if is_video {
+                if let Some((show, season)) = detect_episode(&name) {
+                    return format!("Videos/{}/Season {:02}", show, season);
+                }
+                return "Videos".to_string();
+            }
+            if is_image { return "Pictures".to_string(); }
+            if is_doc { return "Documents".to_string(); }
+        }
+        category_for(&ext).to_string()
+    });
+    if args.tv && is_video {
+        if let Some((show, season)) = detect_episode(&name) {
+            cat = format!("Videos/{}/Season {:02}", show, season);
+        }
+    }
         if args.by_date {
             if let Ok(meta) = fs::metadata(f) {
                 if let Ok(mtime) = meta.modified() {

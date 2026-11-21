@@ -12,6 +12,8 @@ param(
     [switch]$Recursive,
     [switch]$Reorganize,
     [switch]$Hidden,
+    [switch]$Tv,
+    [switch]$Smart,
     [switch]$DryRun,
     [switch]$Explain,
     [string]$Target = "",
@@ -96,6 +98,28 @@ function Category-For([string]$ext) {
     }
 }
 
+
+function Detect-Episode([string]$name) {
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
+    # SxxExx
+    if ($stem -match '^(.+)[._ -]+[sS](\d{1,2})[._ -]*[eE](\d{1,3})') {
+        $show = $Matches[1].Trim(" ._-")
+        $season = [int]$Matches[2]
+        if ($show) { return @{ show = $show; season = $season } }
+    }
+    # NxM
+    if ($stem -match '^(.+)[._ -]+(\d{1,2})[xX](\d{1,3})') {
+        $show = $Matches[1].Trim(" ._-")
+        $season = [int]$Matches[2]
+        if ($show) { return @{ show = $show; season = $season } }
+    }
+    return $null
+}
+
+function Is-Video([string]$ext) {
+    return $ext.ToLower() -in @("mp4","mkv","avi","mov","wmv","flv","webm","m4v","mpg","mpeg","3gp","ogv")
+}
+
 # Rules
 $rulePatterns = @()
 $ruleDests = @()
@@ -145,6 +169,7 @@ if ($Undo) {
     exit 0
 }
 
+$Recursive = $Recursive -or $Smart
 # Collect files
 $files = @()
 $pruneNames = @()
@@ -199,7 +224,27 @@ $moveCount = 0
 foreach ($f in $files) {
     $ext = [System.IO.Path]::GetExtension($f.Name).TrimStart(".")
     $cat = Rule-For $f.Name
-    if (-not $cat) { $cat = Category-For $ext }
+    if (-not $cat) {
+        $isVideo = Is-Video $ext
+        if ($Tv -and $isVideo) {
+            $ep = Detect-Episode $f.Name
+            if (-not $ep) { continue }
+            $cat = "Videos/$($ep.show)/Season $($ep.season.ToString('00'))"
+        } elseif ($Smart) {
+            if ($isVideo) {
+                $ep = Detect-Episode $f.Name
+                if ($ep) { $cat = "Videos/$($ep.show)/Season $($ep.season.ToString('00'))" } else { $cat = "Videos" }
+            } elseif ($ext.ToLower() -in @("jpg","jpeg","png","gif","bmp","tiff","tif","webp","svg")) {
+                $cat = "Pictures"
+            } elseif ($ext.ToLower() -in @("pdf","doc","docx","txt","rtf","odt","md")) {
+                $cat = "Documents"
+            } else {
+                $cat = Category-For $ext
+            }
+        } else {
+            $cat = Category-For $ext
+        }
+    }
     # by-date
     if ($ByDate) {
         $d = $f.LastWriteTime
