@@ -29,8 +29,6 @@ param(
     [string]$MaxSize = "",
     [int]$OlderThan = 0,
     [switch]$Undo,
-    [switch]$Watch,
-    [int]$WatchInterval = 5,
     [switch]$Version,
     [switch]$Doctor,
     [switch]$Help
@@ -71,7 +69,7 @@ function Parse-Size([string]$s) {
 }
 
 $dir = (Resolve-Path $Directory).Path
-if (-not $Target) { $Target = $dir } else { if (-not (Test-Path $Target)) { New-Item -ItemType Directory -Force -Path $Target | Out-Null }; $Target = (Resolve-Path $Target).Path }
+if (-not $Target) { $Target = $dir } else { $Target = (Resolve-Path $Target -ErrorAction SilentlyContinue).Path; if (-not $Target) { New-Item -ItemType Directory -Force -Path $args[0] | Out-Null; $Target = (Resolve-Path $Target).Path } }
 # ensure target exists
 if (-not (Test-Path $Target)) { New-Item -ItemType Directory -Force -Path $Target | Out-Null }
 $Target = (Resolve-Path $Target).Path
@@ -123,7 +121,8 @@ function Is-Video([string]$ext) {
 }
 
 # Rules
-$script:Rules = @()
+$rulePatterns = @()
+$ruleDests = @()
 if ($Rules -and (Test-Path $Rules)) {
     $rp = (Resolve-Path $Rules).Path
     foreach ($line in (Get-Content $rp)) {
@@ -132,77 +131,17 @@ if ($Rules -and (Test-Path $Rules)) {
         if ($line -match '^(.+?)\s*->\s*(.+)$' -or $line -match '^(.+?)\s*=>\s*(.+)$') {
             $pat = $Matches[1].Trim()
             $dst = $Matches[2].Trim()
-            $cond = ""
-            if ($pat -match '^(.*[^\s])\s+\[(.+)\]$') {
-                $pat = $Matches[1].Trim()
-                $cond = $Matches[2].Trim()
-            }
-            $script:Rules += @{ pattern = $pat; cond = $cond; dest = $dst }
+            $rulePatterns += $pat
+            $ruleDests += $dst
         }
     }
 } elseif ($Rules) {
     throw "rules file not found: $Rules"
 }
 
-function Test-RuleCond($cond, $file) {
-    if (-not $cond) { return $true }
-    foreach ($tok in ($cond -split "[,\s]+" | Where-Object { $_ })) {
-        if ($tok -match '^(size|age)(>=|<=|>|<)(.+)$') {
-            $field = $Matches[1]; $op = $Matches[2]; $val = $Matches[3]
-            if ($field -eq "size") {
-                $n = Parse-Size $val
-                $sz = $file.Length
-                $ok = switch ($op) { ">" { $sz -gt $n } ">=" { $sz -ge $n } "<" { $sz -lt $n } "<=" { $sz -le $n } }
-                if (-not $ok) { return $false }
-            } else {
-                $days = [int]$val
-                $age = ((Get-Date) - $file.LastWriteTime).Days
-                $ok = switch ($op) { ">" { $age -gt $days } ">=" { $age -ge $days } "<" { $age -lt $days } "<=" { $age -le $days } }
-                if (-not $ok) { return $false }
-            }
-        }
-    }
-    return $true
-}
-
-function Expand-Dest([string]$dest, $file) {
-    $d = $dest
-    if ($d -match '\{year\}|\{month\}') {
-        $y = $file.LastWriteTime.Year
-        $m = $file.LastWriteTime.Month.ToString("00")
-        $d = $d -replace '\{year\}', $y
-        $d = $d -replace '\{month\}', $m
-    }
-    $ext = [System.IO.Path]::GetExtension($file.Name).TrimStart(".")
-    $d = $d -replace '\{ext\}', $ext.ToLower()
-    $parent = Split-Path $file.FullName -Parent
-    $album = Split-Path $parent -Leaf
-    $artistDir = Split-Path $parent -Parent
-    $artist = ""
-    if ($artistDir) { $artist = Split-Path $artistDir -Leaf }
-    if ($artist -eq $album) { $artist = "" }
-    $d = $d -replace '\{artist\}', $artist
-    $d = $d -replace '\{album\}', $album
-    $stem = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-    $show = ($stem -split '[._ -]')[0]
-    $d = $d -replace '\{show\}', $show
-    return $d
-}
-
-function Rule-For($file) {
-    $base = $file.Name
-    foreach ($r in $script:Rules) {
-        $pat = $r.pattern
-        $matched = $false
-        if ($pat -match '^/(.+)/$') {
-            $re = $Matches[1]
-            if ($base -match $re) { $matched = $true }
-        } else {
-            if ($base -like $pat) { $matched = $true }
-        }
-        if (-not $matched) { continue }
-        if (-not (Test-RuleCond $r.cond $file)) { continue }
-        return (Expand-Dest $r.dest $file)
+function Rule-For([string]$base) {
+    for ($i = 0; $i -lt $rulePatterns.Count; $i++) {
+        if ($base -like $rulePatterns[$i]) { return $ruleDests[$i] }
     }
     return $null
 }
@@ -231,12 +170,6 @@ if ($Undo) {
 }
 
 $Recursive = $Recursive -or $Smart
-while ($true) {
-    $files = @()
-    $counts = @{}
-    $entries = @()
-    $movedCount = 0
-    $movedBytes = 0
 # Collect files
 $files = @()
 $pruneNames = @()
@@ -372,8 +305,4 @@ if ($Json) {
         Write-Output ("  {0,-20} {1} files  {2}" -f $k, $counts[$k].count, $hs)
     }
     Write-Output ("  {0,-20} {1} files  {2}" -f "Total", $movedCount, "")
-}
-
-    if (-not $Watch) { break }
-    Start-Sleep -Seconds $WatchInterval
 }
