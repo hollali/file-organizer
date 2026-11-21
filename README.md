@@ -126,6 +126,16 @@ You can also print the current version:
 ./organize.sh --version
 ```
 
+## Windows
+
+A PowerShell port is available as `organize.ps1` with the core feature set
+(categorization, recursive mode, dry runs, rules, by-date, rename, filters,
+JSON summary and undo). Run it with:
+
+```powershell
+pwsh .\organize.ps1 -Recursive -DryRun .
+```
+
 ## Text UI
 
 A small curses-based wrapper lives in `tui/organize-tui.py` and shells out to

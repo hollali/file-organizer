@@ -67,3 +67,25 @@ jobs:
             -w /src \
             alpine:3.20 \
             sh -c "apk add --no-cache bash && bash tests/test.sh"
+
+  test-windows:
+    name: Test (Windows / PowerShell)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell syntax check
+        shell: pwsh
+        run: |
+          $null = [System.Management.Automation.Language.Parser]::ParseFile("organize.ps1", [ref]$null, [ref]$null)
+          Write-Output "organize.ps1 parses OK"
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          Set-Location smoke
+          "x" | Out-File -Encoding ascii a.png
+          "x" | Out-File -Encoding ascii b.pdf
+          & "$env:GITHUB_WORKSPACE\organize.ps1" .
+          if (-not (Test-Path Images/a.png)) { throw "missing Images/a.png" }
+          if (-not (Test-Path Documents/b.pdf)) { throw "missing Documents/b.pdf" }
+          Write-Output "smoke OK"
