@@ -28,6 +28,9 @@ jobs:
           bash -n completions/organize.bash
           bash -n packaging/build-deb.sh
 
+      - name: Python syntax check
+        run: python3 -m py_compile tui/organize-tui.py
+
       - name: ShellCheck
         run: shellcheck --severity=warning organize.sh tests/test.sh tests/fuzz.sh completions/organize.bash packaging/build-deb.sh
 

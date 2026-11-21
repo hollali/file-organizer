@@ -19,6 +19,7 @@ install:
 	install -Dm644 completions/organize.bash "$(DESTDIR)$(BASHCOMPDIR)/organize"
 	install -Dm644 completions/_organize "$(DESTDIR)$(ZSHCOMPDIR)/_organize"
 	install -Dm644 completions/organize.fish "$(DESTDIR)$(FISHCOMPDIR)/organize.fish"
+	if command -v python3 >/dev/null 2>&1; then install -Dm755 tui/organize-tui.py "$(DESTDIR)$(BINDIR)/organize-tui"; fi
 	@echo "Installed $(DESTDIR)$(BINDIR)/organize"
 	@echo "Installed $(DESTDIR)$(MANDIR)/man1/organize.1"
 	@echo "Installed shell completions"
@@ -29,6 +30,7 @@ uninstall:
 	rm -f "$(DESTDIR)$(BASHCOMPDIR)/organize"
 	rm -f "$(DESTDIR)$(ZSHCOMPDIR)/_organize"
 	rm -f "$(DESTDIR)$(FISHCOMPDIR)/organize.fish"
+	rm -f "$(DESTDIR)$(BINDIR)/organize-tui"
 	@echo "Uninstalled"
 
 test:

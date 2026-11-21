@@ -126,6 +126,19 @@ You can also print the current version:
 ./organize.sh --version
 ```
 
+## Text UI
+
+A small curses-based wrapper lives in `tui/organize-tui.py` and shells out to
+`organize.sh` for every action (it never reimplements organizing logic):
+
+```sh
+python3 tui/organize-tui.py
+```
+
+Keys: `p` preview, `a` apply, `d` edit directory, `1`-`9` toggle options,
+`u` undo, arrows/PgUp/PgDn scroll, `q` quit. `make install` installs it as
+`organize-tui` when Python 3 is available.
+
 ## Usage
 
 ```sh

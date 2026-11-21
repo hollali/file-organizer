@@ -20,7 +20,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/organize
           cp organize.sh README.md LICENSE setup.sh uninstall.sh Makefile dist/organize/
-          cp -r man completions dist/organize/
+          cp -r man completions tui dist/organize/
           tar -C dist -czf "organize-${GITHUB_REF_NAME}.tar.gz" organize
           sha256sum "organize-${GITHUB_REF_NAME}.tar.gz" > "organize-${GITHUB_REF_NAME}.tar.gz.sha256"
 
