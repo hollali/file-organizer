@@ -677,11 +677,18 @@ invoice*.pdf   -> Documents/Invoices
 ```
 
 `=>` is accepted in place of `->`. Matching is case-insensitive against the
-file name only. Rules take precedence over the built-in categories and TV
-mode. Destinations may be nested, but must be relative and must not contain
-`..`. With `--by-date`, the date path is appended below the rule destination.
-The active rules file is never moved, even when it lives inside the directory
-being organized.
+file name only. A pattern wrapped in slashes is treated as an extended
+regular expression instead of a glob:
+
+```
+/^report-.*\.pdf$/  -> Documents/Reports
+```
+
+Rules take precedence over the built-in categories and TV mode. Destinations
+may be nested, but must be relative and must not contain `..`. With
+`--by-date`, the date path is appended below the rule destination. The active
+rules file is never moved, even when it lives inside the directory being
+organized.
 
 Add conditions after the pattern to make a rule apply only to some files.
 Conditions may be combined (separated by spaces or commas) and use `size` or
@@ -700,10 +707,22 @@ Destinations may contain placeholders that are filled in per file:
 | `{year}` | Modification year (`YYYY`) |
 | `{month}` | Modification month (`MM`) |
 | `{ext}` | Lowercase extension without the dot |
+| `{artist}` | Parent directory of the file (music layouts) |
+| `{album}` | Immediate parent directory of the file |
+| `{show}` | Detected series/show name (TV episodes) |
 
 ```
 *.png  -> Pictures/{year}/{month}
 *.txt  -> Text/{ext}
+*.mp3  -> Audio/{artist}/{album}
+*.mkv  -> Videos/{show}/Season 01
+```
+
+Conditions may also test the file's MIME type, either exactly or with a glob:
+
+```
+*.png [mime=image/png]   -> Pictures/PNG
+*.jpg [mime~image/*]     -> Pictures/Images
 ```
 
 The same file can define custom top-level categories with `@category` lines,

@@ -97,6 +97,7 @@ declare -A COUNT_BY_CAT=()
 declare -A SIZE_BY_CAT=()
 declare -A SMART_DEST=()
 declare -A EXT_CAT=()
+declare -A MIME_CACHE=()
 UNDO_LOGS=()
 WORK_SRCS=()
 WORK_CATS=()
@@ -2325,11 +2326,14 @@ load_rules() {
 		[[ -n $dest ]] || die "rules: $file:$lineno: empty folder"
 		if [[ -n $cond ]]; then
 			for tok in ${cond//,/ }; do
-				if [[ ! $tok =~ ^(size|age)(>=|<=|>|<)([0-9]+[kKmMgG]?)$ ]]; then
-					die "rules: $file:$lineno: invalid condition '$tok' (use size/age with >, >=, <, <=)"
-				fi
-				if [[ ${BASH_REMATCH[1]} == age && ${BASH_REMATCH[3]} == *[kKmMgG]* ]]; then
-					die "rules: $file:$lineno: age must be a whole number of days"
+				if [[ $tok =~ ^(size|age)(>=|<=|>|<)([0-9]+[kKmMgG]?)$ ]]; then
+					if [[ ${BASH_REMATCH[1]} == age && ${BASH_REMATCH[3]} == *[kKmMgG]* ]]; then
+						die "rules: $file:$lineno: age must be a whole number of days"
+					fi
+				elif [[ $tok =~ ^mime(=|~).+$ ]]; then
+					:
+				else
+					die "rules: $file:$lineno: invalid condition '$tok' (use size/age with >, >=, <, <=, or mime=type/mime~glob)"
 				fi
 			done
 		fi
@@ -2370,6 +2374,22 @@ file_year_month() {
 	return 1
 }
 
+get_mime_type() {
+	local src=$1 ext
+	if [[ -n ${MIME_CACHE[$src]:-} ]]; then
+		printf '%s' "${MIME_CACHE[$src]}"
+		return
+	fi
+	if command -v file >/dev/null 2>&1; then
+		ext=$(file --mime-type -b -- "$src" 2>/dev/null || true)
+	else
+		ext=""
+	fi
+	[[ -z $ext ]] && ext="application/octet-stream"
+	MIME_CACHE[$src]=$ext
+	printf '%s' "$ext"
+}
+
 compare_number() {
 	local op=$1 a=$2 b=$3
 	case $op in
@@ -2394,6 +2414,10 @@ rule_conditions_met() {
 			field=${BASH_REMATCH[1]}
 			op=${BASH_REMATCH[2]}
 			val=${BASH_REMATCH[3]}
+		elif [[ $tok =~ ^mime(=|~)(.+)$ ]]; then
+			field=mime
+			op=${BASH_REMATCH[1]}
+			val=${BASH_REMATCH[2]}
 		else
 			return 1
 		fi
@@ -2408,6 +2432,15 @@ rule_conditions_met() {
 			[[ $size =~ ^[0-9]+$ ]] || return 1
 			val=$(parse_size "$val") || return 1
 			compare_number "$op" "$size" "$val" || return 1
+		elif [[ $field == mime ]]; then
+			local mime
+			mime=$(get_mime_type "$src")
+			if [[ $op == = ]]; then
+				[[ $mime == "$val" ]] || return 1
+			else
+				# shellcheck disable=SC2053 # glob match is intended
+				[[ $mime == $val ]] || return 1
+			fi
 		else
 			if [[ -z $mtime ]]; then
 				mtime=$(stat -c %Y "$src" 2>/dev/null || date -r "$src" +%s 2>/dev/null || true)
@@ -2423,7 +2456,7 @@ rule_conditions_met() {
 }
 
 expand_rule_dest() {
-	local dest=$1 src=$2 ext=$3 ym="" y="" m=""
+	local dest=$1 src=$2 ext=$3 ym="" y="" m="" artist="" album="" show=""
 	if [[ $dest == *'{year}'* || $dest == *'{month}'* ]]; then
 		ym=$(file_year_month "$src" 2>/dev/null || true)
 		if [[ -n $ym ]]; then
@@ -2431,9 +2464,23 @@ expand_rule_dest() {
 			m=${ym##* }
 		fi
 	fi
+	if [[ $dest == *'{artist}'* || $dest == *'{album}'* || $dest == *'{show}'* ]]; then
+		album=${src%/*}
+		album=${album##*/}
+		artist=${src%/*}
+		artist=${artist%/*}
+		artist=${artist##*/}
+		[[ $artist == "$album" ]] && artist=""
+		if detect_episode "$src" >/dev/null 2>&1; then
+			show=${SMART_SHOW:-}
+		fi
+	fi
 	dest=${dest//\{year\}/$y}
 	dest=${dest//\{month\}/$m}
 	dest=${dest//\{ext\}/$ext}
+	dest=${dest//\{artist\}/$artist}
+	dest=${dest//\{album\}/$album}
+	dest=${dest//\{show\}/$show}
 	while [[ $dest == *//* ]]; do
 		dest=${dest//\/\//\/}
 	done
@@ -2454,15 +2501,22 @@ rule_for() {
 
 	shopt -s nocasematch
 	for ((i = 0; i < ${#RULE_PATTERNS[@]}; i++)); do
-		# shellcheck disable=SC2053 # the right-hand side is intentionally a glob
-		if [[ $base == ${RULE_PATTERNS[i]} ]]; then
-			if [[ -n ${RULE_CONDS[i]} ]] && ! rule_conditions_met "${RULE_CONDS[i]}" "$src"; then
+		if [[ ${RULE_PATTERNS[i]} == /*/ ]]; then
+			local re=${RULE_PATTERNS[i]#/}
+			re=${re%/}
+			if [[ ! $base =~ $re ]]; then
 				continue
 			fi
-			RULE_RESULT=$(expand_rule_dest "${RULE_DESTS[i]}" "$src" "$ext")
-			shopt -u nocasematch
-			return 0
+		else
+			# shellcheck disable=SC2053 # the right-hand side is intentionally a glob
+			[[ $base == ${RULE_PATTERNS[i]} ]] || continue
 		fi
+		if [[ -n ${RULE_CONDS[i]} ]] && ! rule_conditions_met "${RULE_CONDS[i]}" "$src"; then
+			continue
+		fi
+		RULE_RESULT=$(expand_rule_dest "${RULE_DESTS[i]}" "$src" "$ext")
+		shopt -u nocasematch
+		return 0
 	done
 	shopt -u nocasematch
 	return 1
