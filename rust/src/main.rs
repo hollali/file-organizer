@@ -281,18 +281,25 @@ fn run_once(args: &Args) {
     }
 
     // rules
-    let mut rule_pats: Vec<String> = Vec::new();
-    let mut rule_dests: Vec<String> = Vec::new();
+    #[derive(Clone)]
+    struct Rule { pattern: String, cond: String, dest: String }
+    let mut rules: Vec<Rule> = Vec::new();
     if let Some(rf) = &args.rules {
         if let Ok(content) = fs::read_to_string(rf) {
             for line in content.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') { continue; }
                 if let Some(idx) = line.find("->").or_else(|| line.find("=>")) {
-                    let pat = line[..idx].trim().to_string();
+                    let mut pat = line[..idx].trim().to_string();
                     let dst = line[idx+2..].trim().to_string();
-                    rule_pats.push(pat);
-                    rule_dests.push(dst);
+                    let mut cond = String::new();
+                    if let Some(b) = pat.rfind('[') {
+                        if pat.ends_with(']') {
+                            cond = pat[b+1..pat.len()-1].trim().to_string();
+                            pat = pat[..b].trim().to_string();
+                        }
+                    }
+                    rules.push(Rule { pattern: pat, cond, dest: dst });
                 }
             }
         }
@@ -308,11 +315,47 @@ fn run_once(args: &Args) {
         let ext = f.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
         // rule
         let mut cat: Option<String> = None;
-        for (i, pat) in rule_pats.iter().enumerate() {
-            if glob_match(pat, &name) {
-                cat = Some(rule_dests[i].clone());
-                break;
+        for rule in &rules {
+            let matched = if rule.pattern.starts_with('/') && rule.pattern.ends_with('/') && rule.pattern.len() > 2 {
+                let re = &rule.pattern[1..rule.pattern.len()-1];
+                regex::Regex::new(re).map(|r| r.is_match(&name)).unwrap_or(false)
+            } else {
+                glob_match(&rule.pattern, &name)
+            };
+            if !matched { continue; }
+            // conditions
+            let mut ok = true;
+            for tok in rule.cond.split_whitespace() {
+                let (field, op, val) = if let Some(_) = tok.strip_prefix("size") {
+                    let (o, v) = split_cond(tok, "size");
+                    ("size", o, v)
+                } else if let Some(_) = tok.strip_prefix("age") {
+                    let (o, v) = split_cond(tok, "age");
+                    ("age", o, v)
+                } else {
+                    ("", String::new(), String::new())
+                };
+                if field == "size" {
+                    if let Ok(meta) = fs::metadata(f) {
+                        let n = parse_size(&val);
+                        if !cmp_num(&op, meta.len(), n) { ok = false; break; }
+                    }
+                } else if field == "age" {
+                    if let Ok(meta) = fs::metadata(f) {
+                        if let Ok(mtime) = meta.modified() {
+                            let now = SystemTime::now();
+                            let age_days = now.duration_since(mtime).unwrap_or_default().as_secs() / 86400;
+                            let n: u64 = val.parse().unwrap_or(0);
+                            if !cmp_num(&op, age_days, n) { ok = false; break; }
+                        }
+                    }
+                }
             }
+            if !ok { continue; }
+            let extl = ext.to_lowercase();
+            let dest = expand_dest(&rule.dest, f, &extl, &name);
+            cat = Some(dest);
+            break;
         }
         let is_video = matches!(ext.to_lowercase().as_str(), "mp4"|"mkv"|"avi"|"mov"|"wmv"|"flv"|"webm"|"m4v"|"mpg"|"mpeg"|"3gp"|"ogv");
     let is_image = matches!(ext.to_lowercase().as_str(), "jpg"|"jpeg"|"png"|"gif"|"bmp"|"tiff"|"tif"|"webp"|"svg"|"heic"|"heif"|"avif"|"raw");
@@ -484,6 +527,55 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+
+fn split_cond(tok: &str, field: &str) -> (String, String) {
+    let rest = &tok[field.len()..];
+    for op in [">=", "<=", ">", "<"] {
+        if let Some(v) = rest.strip_prefix(op) {
+            return (op.to_string(), v.to_string());
+        }
+    }
+    ("".to_string(), "".to_string())
+}
+
+fn cmp_num(op: &str, a: u64, b: u64) -> bool {
+    match op {
+        ">" => a > b,
+        ">=" => a >= b,
+        "<" => a < b,
+        "<=" => a <= b,
+        _ => false,
+    }
+}
+
+fn expand_dest(dest: &str, src: &Path, ext: &str, _name: &str) -> String {
+    let mut d = dest.to_string();
+    if d.contains("{year}") || d.contains("{month}") {
+        if let Ok(meta) = fs::metadata(src) {
+            if let Ok(mtime) = meta.modified() {
+                let secs = mtime.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let days = secs / 86400;
+                let (y, m, _) = civil_from_days(days as i64);
+                d = d.replace("{year}", &format!("{}", y));
+                d = d.replace("{month}", &format!("{:02}", m));
+            }
+        }
+    }
+    d = d.replace("{ext}", ext);
+    let parent = src.parent().map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string()).unwrap_or_default();
+    let grand = src.parent().and_then(|p| p.parent()).map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string()).unwrap_or_default();
+    if !grand.is_empty() && grand != parent {
+        d = d.replace("{artist}", &grand);
+    } else {
+        d = d.replace("{artist}", "");
+    }
+    d = d.replace("{album}", &parent);
+    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let show = stem.split(|c: char| c == '.' || c == '_' || c == '-' || c == ' ').next().unwrap_or("").to_string();
+    d = d.replace("{show}", &show);
+    d
 }
 
 fn main() {
