@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "organize-rs", version = "1.3.1", about = "Fast file organizer (Rust core)")]
 struct Args {
     #[arg(default_value = ".")]
@@ -23,6 +23,10 @@ struct Args {
     tv: bool,
     #[arg(long = "smart")]
     smart: bool,
+    #[arg(long = "watch")]
+    watch: bool,
+    #[arg(long = "watch-interval", default_value = "5")]
+    watch_interval: u64,
     #[arg(long = "by-date")]
     by_date: bool,
     #[arg(long = "rename")]
@@ -178,8 +182,8 @@ fn detect_episode(name: &str) -> Option<(String, u32)> {
     None
 }
 
-fn main() {
-    let args = Args::parse();
+fn run_once(args: &Args) {
+    let args = args.clone();
     let dir = fs::canonicalize(&args.directory).unwrap_or_else(|_| PathBuf::from(&args.directory));
     let target = if let Some(t) = &args.target {
         let p = PathBuf::from(t);
@@ -480,4 +484,16 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+fn main() {
+    let args = Args::parse();
+    if args.watch {
+        loop {
+            run_once(&args);
+            std::thread::sleep(std::time::Duration::from_secs(args.watch_interval));
+        }
+    } else {
+        run_once(&args);
+    }
 }

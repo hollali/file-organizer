@@ -29,6 +29,8 @@ param(
     [string]$MaxSize = "",
     [int]$OlderThan = 0,
     [switch]$Undo,
+    [switch]$Watch,
+    [int]$WatchInterval = 5,
     [switch]$Version,
     [switch]$Doctor,
     [switch]$Help
