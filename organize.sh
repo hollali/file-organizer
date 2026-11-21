@@ -96,7 +96,14 @@ declare -A SEEN_HASH=()
 declare -A COUNT_BY_CAT=()
 declare -A SIZE_BY_CAT=()
 declare -A SMART_DEST=()
+declare -A EXT_CAT=()
 UNDO_LOGS=()
+WORK_SRCS=()
+WORK_CATS=()
+WORK_LABELS=()
+WORK_REASONS=()
+JOBS=1
+WORKER_MODE=0
 CATEGORY_RESULT=""
 RULE_RESULT=""
 UNIQUE_RESULT=""
@@ -182,6 +189,7 @@ Options:
                      (e.g. 09:00,15:00,21:00@~/Downloads)
       --unschedule   Remove scheduled cron jobs for the current directory
       --watch [SEC]  Organize repeatedly every SEC seconds (default 5)
+      --jobs N       Use N parallel workers for moves (default 1)
       --install-timer TIMES[@DIR]  Install systemd user timers for DIR
       --uninstall-timer  Remove systemd timers for the current directory
   -h, --help         Show this help
@@ -496,6 +504,13 @@ while (($# > 0)); do
 		CONFIRM=1
 		shift
 		;;
+	--jobs)
+		(($# >= 2)) || die "option $1 requires an argument"
+		[[ $2 =~ ^[0-9]+$ ]] || die "invalid jobs: $2"
+		JOBS=$2
+		((JOBS >= 1)) || die "jobs must be >= 1"
+		shift 2
+		;;
 	--watch)
 		WATCH=1
 		if (($# >= 2)) && [[ $2 =~ ^[0-9]+$ ]]; then
@@ -804,6 +819,10 @@ ensure_log() {
 }
 
 log_move() {
+	if ((WORKER_MODE)); then
+		printf '%s\0%s\0' "$1" "$2" >>"$LOG"
+		return
+	fi
 	ensure_log || return
 	printf '%s\0%s\0' "$1" "$2" >>"$LOG"
 }
@@ -1766,8 +1785,11 @@ dir_has_video() {
 	while IFS= read -r -d '' f; do
 		ext=${f##*.}
 		ext=${ext,,}
-		category_for "$ext"
-		[[ $CATEGORY_RESULT == Videos ]] && return 0
+		if [[ -z ${EXT_CAT[${ext:-__none__}]:-} ]]; then
+			category_for "$ext"
+			EXT_CAT[${ext:-__none__}]=$CATEGORY_RESULT
+		fi
+		[[ ${EXT_CAT[${ext:-__none__}]} == Videos ]] && return 0
 	done < <(find "$d" -maxdepth 3 -type f -print0 2>/dev/null)
 	return 1
 }
@@ -1939,7 +1961,10 @@ smart_move() {
 		handle_duplicate "$src" "$dest"
 		return 0
 	fi
-	move_one "$src" "$dest_dir" 0 "$label"
+	WORK_SRCS+=("$src")
+	WORK_CATS+=("$dest_dir")
+	WORK_LABELS+=("${label:-}")
+	WORK_REASONS+=("$MOVE_REASON")
 }
 
 # Remove folders emptied by smart mode, keeping directory categories intact.
@@ -1981,13 +2006,16 @@ smart_organize() {
 		base=${src##*/}
 		ext=""
 		[[ $base != .* && $base == *.* ]] && ext=${base##*.}
-		category_for "$ext"
-		[[ $CATEGORY_RESULT == Videos ]] || continue
+		if [[ -z ${EXT_CAT[${ext:-__none__}]:-} ]]; then
+			category_for "$ext"
+			EXT_CAT[${ext:-__none__}]=$CATEGORY_RESULT
+		fi
+		[[ ${EXT_CAT[${ext:-__none__}]} == Videos ]] || continue
 		# Explicit rules and custom categories always win over smart detection.
-		if rule_for "$src"; then
+		if ((${#RULE_PATTERNS[@]} > 0)) && rule_for "$src"; then
 			continue
 		fi
-		if custom_category_for "$ext"; then
+		if ((${#CAT_EXT_NAMES[@]} > 0)) && custom_category_for "$ext"; then
 			continue
 		fi
 
@@ -2023,7 +2051,7 @@ smart_organize() {
 		abs_dir=""
 		label=""
 		MOVE_REASON=""
-		if rule_for "$src"; then
+		if ((${#RULE_PATTERNS[@]} > 0)) && rule_for "$src"; then
 			cat=$RULE_RESULT
 			rel=$cat
 			label=${cat%%/*}
@@ -2055,11 +2083,14 @@ smart_organize() {
 					printf 'left in place (no matching video for sidecar): %s\n' "$src"
 					continue
 				fi
-				if custom_category_for "$ext"; then
+				if ((${#CAT_EXT_NAMES[@]} > 0)) && custom_category_for "$ext"; then
 					cat=$CATEGORY_RESULT
 				else
-					category_for "$ext"
-					cat=$CATEGORY_RESULT
+					if [[ -z ${EXT_CAT[${ext:-__none__}]:-} ]]; then
+						category_for "$ext"
+						EXT_CAT[${ext:-__none__}]=$CATEGORY_RESULT
+					fi
+					cat=${EXT_CAT[${ext:-__none__}]}
 				fi
 				case $cat in
 				Videos)
@@ -2122,8 +2153,6 @@ smart_organize() {
 			SEEN_HASH["$CUR_SIZE:$CUR_HASH"]=${LAST_DEST:-$src}
 		fi
 	done
-
-	prune_empty_source_dirs
 }
 
 move_one() {
@@ -3124,15 +3153,18 @@ elif ((${#files[@]} > 0)); then
 
 		structured=0
 		MOVE_REASON=""
-		if rule_for "$src"; then
+		if ((${#RULE_PATTERNS[@]} > 0)) && rule_for "$src"; then
 			cat=$RULE_RESULT
 			MOVE_REASON="custom rule"
-		elif custom_category_for "$ext"; then
+		elif ((${#CAT_EXT_NAMES[@]} > 0)) && custom_category_for "$ext"; then
 			cat=$CATEGORY_RESULT
 			MOVE_REASON="custom category $cat"
 		else
-			category_for "$ext"
-			cat=$CATEGORY_RESULT
+			if [[ -z ${EXT_CAT[${ext:-__none__}]:-} ]]; then
+				category_for "$ext"
+				EXT_CAT[${ext:-__none__}]=$CATEGORY_RESULT
+			fi
+			cat=${EXT_CAT[${ext:-__none__}]}
 			MOVE_REASON="extension .${ext:-none}"
 			if [[ $cat == Videos ]]; then
 				# Videos are never dumped into a generic folder: recognized
@@ -3177,7 +3209,10 @@ elif ((${#files[@]} > 0)); then
 			fi
 		fi
 
-		move_one "$src" "$cat"
+		WORK_SRCS+=("$src")
+		WORK_CATS+=("$cat")
+		WORK_LABELS+=("")
+		WORK_REASONS+=("$MOVE_REASON")
 
 		if [[ $DEDUPE -eq 1 ]]; then
 			SEEN_HASH["$CUR_SIZE:$CUR_HASH"]=${LAST_DEST:-$src}
@@ -3185,10 +3220,90 @@ elif ((${#files[@]} > 0)); then
 	done
 fi
 
+# Run collected moves. Serial by default; --jobs enables bounded parallelism.
+if ((${#WORK_SRCS[@]} > 0)); then
+	if ((JOBS <= 1 || DEDUPE == 1)); then
+		for ((wi = 0; wi < ${#WORK_SRCS[@]}; wi++)); do
+			MOVE_REASON=${WORK_REASONS[wi]}
+			move_one "${WORK_SRCS[wi]}" "${WORK_CATS[wi]}" 0 "${WORK_LABELS[wi]}"
+		done
+	else
+		tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/organize-jobs-XXXXXX") || die "cannot create temp dir"
+		chunks=()
+		for ((j = 0; j < JOBS; j++)); do
+			chunks+=("$tmpdir/chunk-$j")
+			: >"${chunks[j]}"
+		done
+		for ((wi = 0; wi < ${#WORK_SRCS[@]}; wi++)); do
+			j=$((wi % JOBS))
+			printf '%s\0%s\0%s\0%s\0' "${WORK_SRCS[wi]}" "${WORK_CATS[wi]}" "${WORK_LABELS[wi]}" "${WORK_REASONS[wi]}" >>"${chunks[j]}"
+		done
+		MOVES_STARTED=1
+		pids=()
+		countfiles=()
+		for ((j = 0; j < JOBS; j++)); do
+			countfiles+=("$tmpdir/count-$j")
+			(
+				WORKER_MODE=1
+				LOG="$tmpdir/log-$j"
+				: >"$LOG"
+				while IFS= read -r -d '' src && IFS= read -r -d '' cat && IFS= read -r -d '' label && IFS= read -r -d '' reason; do
+					MOVE_REASON=$reason
+					move_one "$src" "$cat" 0 "$label"
+				done <"${chunks[j]}"
+				{
+					printf 'MOVED_COUNT %d\n' "$MOVED_COUNT"
+					printf 'MOVED_BYTES %d\n' "$MOVED_BYTES"
+					for _k in "${!COUNT_BY_CAT[@]}"; do
+						printf 'COUNT %q %d\n' "$_k" "${COUNT_BY_CAT[$_k]}"
+					done
+					for _k in "${!SIZE_BY_CAT[@]}"; do
+						printf 'SIZE %q %d\n' "$_k" "${SIZE_BY_CAT[$_k]}"
+					done
+				} >"${countfiles[j]}"
+			) &
+			pids+=($!)
+		done
+		for pid in "${pids[@]}"; do
+			wait "$pid" || true
+		done
+		# Aggregate per-worker counters.
+		MOVED_COUNT=0
+		MOVED_BYTES=0
+		COUNT_BY_CAT=()
+		SIZE_BY_CAT=()
+		ensure_log
+		for ((j = 0; j < JOBS; j++)); do
+			[[ -f $tmpdir/log-$j ]] && cat "$tmpdir/log-$j" >>"$LOG"
+		done
+		for ((j = 0; j < JOBS; j++)); do
+			[[ -f ${countfiles[j]} ]] || continue
+			while read -r key a b; do
+				case $key in
+				MOVED_COUNT) MOVED_COUNT=$((MOVED_COUNT + a)) ;;
+				MOVED_BYTES) MOVED_BYTES=$((MOVED_BYTES + a)) ;;
+				COUNT) COUNT_BY_CAT[$a]=$(( ${COUNT_BY_CAT[$a]:-0} + b )) ;;
+				SIZE) SIZE_BY_CAT[$a]=$(( ${SIZE_BY_CAT[$a]:-0} + b )) ;;
+				esac
+			done <"${countfiles[j]}"
+		done
+		rm -rf "$tmpdir"
+	fi
+fi
+
+WORK_SRCS=()
+WORK_CATS=()
+WORK_LABELS=()
+WORK_REASONS=()
+
 if [[ $TV_MODE -eq 1 ]]; then
 	merge_variant_dirs "$TARGET/Videos"
 else
 	merge_variant_dirs "$TARGET"
+fi
+
+if ((SMART_MODE)); then
+	prune_empty_source_dirs
 fi
 
 if ((REORGANIZE)); then

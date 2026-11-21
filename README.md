@@ -299,6 +299,7 @@ changed until step 5.
 | `--apply-plan FILE` | Apply a reviewed plan file |
 | `--confirm` | Review and select individual moves (whiptail) |
 | `--watch [SEC]` | Organize repeatedly every SEC seconds (default 5) |
+| `--jobs N` | Use N parallel workers for moves (default 1) |
 | `-u, --undo [N]` | Undo the Nth most recent run (default: 1) in the given directory |
 | `--undo-list` | List undo history for the given directory |
 | `--by-date` | Group files as `Category/YYYY/MM/` |
