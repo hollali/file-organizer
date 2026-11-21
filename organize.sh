@@ -3282,8 +3282,8 @@ if ((${#WORK_SRCS[@]} > 0)); then
 				case $key in
 				MOVED_COUNT) MOVED_COUNT=$((MOVED_COUNT + a)) ;;
 				MOVED_BYTES) MOVED_BYTES=$((MOVED_BYTES + a)) ;;
-				COUNT) COUNT_BY_CAT[$a]=$(( ${COUNT_BY_CAT[$a]:-0} + b )) ;;
-				SIZE) SIZE_BY_CAT[$a]=$(( ${SIZE_BY_CAT[$a]:-0} + b )) ;;
+				COUNT) COUNT_BY_CAT[$a]=$((${COUNT_BY_CAT[$a]:-0} + b)) ;;
+				SIZE) SIZE_BY_CAT[$a]=$((${SIZE_BY_CAT[$a]:-0} + b)) ;;
 				esac
 			done <"${countfiles[j]}"
 		done
