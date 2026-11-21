@@ -126,6 +126,22 @@ You can also print the current version:
 ./organize.sh --version
 ```
 
+## Rust core (optional, experimental)
+
+A Rust port of the core organize loop lives in `rust/` and builds with
+`cargo build --release` (requires Rust 1.70+). It supports the basic
+feature set (categorization, recursive, dry-run, target, undo, filters,
+rules, by-date, rename, JSON summary) and is significantly faster on
+large trees:
+
+```sh
+cd rust && cargo build --release
+./rust/target/release/organize-rs --help
+```
+
+`make rust` builds it and `make install` installs it as `organize-rs` when
+present. The Bash script remains the reference implementation.
+
 ## Windows
 
 A PowerShell port is available as `organize.ps1` with the core feature set

@@ -89,3 +89,20 @@ jobs:
           if (-not (Test-Path Images/a.png)) { throw "missing Images/a.png" }
           if (-not (Test-Path Documents/b.pdf)) { throw "missing Documents/b.pdf" }
           Write-Output "smoke OK"
+
+  build-rust:
+    name: Build Rust core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        working-directory: rust
+        run: cargo build --release
+      - name: Smoke test
+        run: |
+          rm -rf /tmp/rstest && mkdir -p /tmp/rstest
+          touch /tmp/rstest/a.png /tmp/rstest/b.pdf
+          ./rust/target/release/organize-rs /tmp/rstest
+          test -f /tmp/rstest/Images/a.png
+          test -f /tmp/rstest/Documents/b.pdf

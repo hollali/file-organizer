@@ -8,13 +8,14 @@ FISHCOMPDIR ?= $(PREFIX)/share/fish/vendor_completions.d
 BASH ?= bash
 VERSION ?= $(shell sed -n 's/^VERSION="\(.*\)"/\1/p' organize.sh)
 
-.PHONY: all install uninstall test fuzz bench lint check deb
+.PHONY: all install uninstall test fuzz bench lint check deb rust
 
 all:
-	@echo "Targets: install uninstall test fuzz bench lint check deb"
+	@echo "Targets: install uninstall test fuzz bench lint check deb rust"
 
 install:
 	install -Dm755 organize.sh "$(DESTDIR)$(BINDIR)/organize"
+	if [ -f rust/target/release/organize-rs ]; then install -Dm755 rust/target/release/organize-rs "$(DESTDIR)$(BINDIR)/organize-rs"; fi
 	install -Dm644 man/organize.1 "$(DESTDIR)$(MANDIR)/man1/organize.1"
 	install -Dm644 completions/organize.bash "$(DESTDIR)$(BASHCOMPDIR)/organize"
 	install -Dm644 completions/_organize "$(DESTDIR)$(ZSHCOMPDIR)/_organize"
@@ -38,6 +39,9 @@ test:
 
 fuzz:
 	$(BASH) tests/fuzz.sh
+
+rust:
+	cd rust && cargo build --release
 
 bench:
 	$(BASH) tests/bench.sh $(COUNT)

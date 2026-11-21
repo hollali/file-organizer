@@ -1,0 +1,14 @@
+/home/hollali/Projects/file-organizer/rust/target/release/build/serde/559842cc4b0b5e6c/out/serde-559842cc4b0b5e6c.d: /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/hollali/Projects/file-organizer/rust/target/release/build/serde/fc03014c78dcddb0/out/private.rs
+
+/home/hollali/Projects/file-organizer/rust/target/release/build/serde/559842cc4b0b5e6c/out/libserde-559842cc4b0b5e6c.rlib: /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/hollali/Projects/file-organizer/rust/target/release/build/serde/fc03014c78dcddb0/out/private.rs
+
+/home/hollali/Projects/file-organizer/rust/target/release/build/serde/559842cc4b0b5e6c/out/libserde-559842cc4b0b5e6c.rmeta: /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/hollali/Projects/file-organizer/rust/target/release/build/serde/fc03014c78dcddb0/out/private.rs
+
+/home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/home/hollali/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/home/hollali/Projects/file-organizer/rust/target/release/build/serde/fc03014c78dcddb0/out/private.rs:
+
+# env-dep:OUT_DIR=/home/hollali/Projects/file-organizer/rust/target/release/build/serde/fc03014c78dcddb0/out
