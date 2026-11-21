@@ -85,9 +85,15 @@ jobs:
           Set-Location smoke
           "x" | Out-File -Encoding ascii a.png
           "x" | Out-File -Encoding ascii b.pdf
-          & "$env:GITHUB_WORKSPACE\organize.ps1" .
-          if (-not (Test-Path Images/a.png)) { throw "missing Images/a.png" }
-          if (-not (Test-Path Documents/b.pdf)) { throw "missing Documents/b.pdf" }
+          try {
+            & "$env:GITHUB_WORKSPACE\organize.ps1" .
+            if (-not (Test-Path Images/a.png)) { throw "missing Images/a.png" }
+            if (-not (Test-Path Documents/b.pdf)) { throw "missing Documents/b.pdf" }
+            } catch {
+            Write-Output "CAUGHT: $($_.Exception.Message)"
+            Write-Output "LINE: $($_.InvocationInfo.ScriptLineNumber)"
+            throw
+          }
           Write-Output "smoke OK"
 
   build-rust:
