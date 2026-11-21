@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 rust/target/
+psruletest/
+psruletest2/
+psruletest3/
+psruletest4/
+smoke/
+rust/src/detect_episode.rs
