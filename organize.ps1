@@ -178,7 +178,8 @@ function Expand-Dest([string]$dest, $file) {
     $parent = Split-Path $file.FullName -Parent
     $album = Split-Path $parent -Leaf
     $artistDir = Split-Path $parent -Parent
-    $artist = Split-Path $artistDir -Leaf
+    $artist = ""
+    if ($artistDir) { $artist = Split-Path $artistDir -Leaf }
     if ($artist -eq $album) { $artist = "" }
     $d = $d -replace '\{artist\}', $artist
     $d = $d -replace '\{album\}', $album
