@@ -71,7 +71,7 @@ function Parse-Size([string]$s) {
 }
 
 $dir = (Resolve-Path $Directory).Path
-if (-not $Target) { $Target = $dir } else { $Target = (Resolve-Path $Target -ErrorAction SilentlyContinue).Path; if (-not $Target) { New-Item -ItemType Directory -Force -Path $args[0] | Out-Null; $Target = (Resolve-Path $Target).Path } }
+if (-not $Target) { $Target = $dir } else { if (-not (Test-Path $Target)) { New-Item -ItemType Directory -Force -Path $Target | Out-Null }; $Target = (Resolve-Path $Target).Path }
 # ensure target exists
 if (-not (Test-Path $Target)) { New-Item -ItemType Directory -Force -Path $Target | Out-Null }
 $Target = (Resolve-Path $Target).Path
